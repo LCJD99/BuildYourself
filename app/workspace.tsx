@@ -15,10 +15,18 @@ import {
 
 type Graph = {
   evidence: Evidence[];
-  results: Result[];
+  results: Array<Result & {
+    method?: '规则核验' | 'Agent 汇总';
+    reasoning?: string;
+    confirmationRequired?: boolean;
+    confirmationRequirement?: string;
+    canConfirm?: boolean;
+    confirmedAt?: string | null;
+  }>;
   assessments: Record<EvidenceNodeId, EvidenceAssessment>;
   requirements: Record<EvidenceNodeId, MinimumEvidenceLevel>;
   taskExecution: TaskExecution;
+  changes: Array<{ id: string; eventType: string; entityId: string; summary: string; createdAt: string; evidenceIds: string[] }>;
   context: NodeId;
 };
 
@@ -34,6 +42,8 @@ export default function Workspace() {
   const [selection, setSelected] = useState<NodeId | null>(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [celebrating, setCelebrating] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -100,6 +110,28 @@ export default function Workspace() {
       setError(cause instanceof Error ? cause.message : '无法保存证据要求');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function confirmMilestone() {
+    setConfirming(true);
+    try {
+      const response = await fetch('/api/milestone-confirmation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'milestone' }),
+      });
+      const result = await response.json() as { created?: boolean; error?: string };
+      if (!response.ok) throw Error(result.error || '无法确认里程碑');
+      if (result.created) {
+        setCelebrating(true);
+        window.setTimeout(() => setCelebrating(false), 1100);
+      }
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法确认里程碑');
+    } finally {
+      setConfirming(false);
     }
   }
 
@@ -220,18 +252,36 @@ export default function Workspace() {
             </section>
           )}
 
-          {results.map((result, index) => (
-            <article className="result" key={result.title}>
-              <div className="result-label"><span>{index === 0 ? '01' : '02'} / {result.title}</span><span>{index === 0 ? '□' : '◇'}</span></div>
-              <div className={`status ${result.tone}`}><span>●</span> {result.status}</div>
-              <p>{result.detail}</p>
-              <dl>
-                <dt>判定标准</dt><dd>{result.standard}</dd>
-                <dt>证据来源</dt><dd>{result.evidence.length ? result.evidence.map(evidence => `${evidence.level} ${evidence.source}（${evidence.reference}）`).join('；') : '暂无关联证据'}</dd>
-                <dt>判定缺口</dt><dd>{result.gap}</dd>
-              </dl>
-            </article>
-          ))}
+          {results.map((result, index) => {
+            const isMilestone = index === 1;
+            return (
+              <article className={`result${isMilestone && celebrating ? ' celebrating' : ''}`} key={result.title}>
+                <div className="result-label"><span>{index === 0 ? '01' : '02'} / {result.title}</span><span>{index === 0 ? '□' : '◇'}</span></div>
+                <div className={`status ${result.tone}`} aria-live="polite"><span>●</span> {result.status}</div>
+                <p>{result.detail}</p>
+                <dl>
+                  <dt>判定标准</dt><dd>{result.standard}</dd>
+                  <dt>证据来源</dt><dd>{result.evidence.length ? result.evidence.map(evidence => `${evidence.level} ${evidence.source}（${evidence.reference}）`).join('；') : '暂无关联证据'}</dd>
+                  <dt>判定缺口</dt><dd>{result.gap}</dd>
+                  {isMilestone && <><dt>判定方式</dt><dd>{result.method ?? '规则核验'}</dd><dt>判定理由</dt><dd>{result.reasoning ?? result.detail}</dd><dt>确认要求</dt><dd>{result.confirmationRequirement ?? '达到标准后由用户核对并确认。'}</dd></>}
+                </dl>
+                {isMilestone && selected === 'milestone' && result.canConfirm && (
+                  <button className="primary-button confirm-button" disabled={confirming} onClick={() => void confirmMilestone()}>
+                    {confirming ? '保存确认…' : '确认里程碑达成'}
+                  </button>
+                )}
+                {isMilestone && result.status === '已确认达成' && result.confirmedAt && (
+                  <p className="confirmed-at">已于 {date(result.confirmedAt)} 确认达成</p>
+                )}
+              </article>
+            );
+          })}
+          <section className="change-log" aria-labelledby="change-log-title">
+            <div className="result-label"><h3 id="change-log-title">变更记录</h3><span>{graph?.changes.length ?? 0}</span></div>
+            {graph?.changes.length ? (
+              <ul>{graph.changes.map(change => <li key={change.id}><span>{change.summary}</span><time>{date(change.createdAt)}</time></li>)}</ul>
+            ) : <p>尚无里程碑确认记录。</p>}
+          </section>
           <div className="hint"><span>✳</span><p><strong>执行完成与目标进展分开判断</strong><br />保存行动完成不会自动提高能力或里程碑判定。</p></div>
         </div>
       </aside>
