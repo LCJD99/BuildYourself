@@ -7,6 +7,7 @@ import {
   type Evidence,
   type EvidenceAssessment,
   type EvidenceNodeId,
+  type EvidenceSnapshot,
   type MinimumEvidenceLevel,
   type NodeId,
   type Result,
@@ -26,15 +27,50 @@ type Graph = {
   assessments: Record<EvidenceNodeId, EvidenceAssessment>;
   requirements: Record<EvidenceNodeId, MinimumEvidenceLevel>;
   taskExecution: TaskExecution;
-  changes: Array<{ id: string; eventType: string; entityId: string; summary: string; createdAt: string; evidenceIds: string[] }>;
+  changes: Array<{
+    id: string;
+    eventType: 'milestone.confirmed' | 'evidence.corrected';
+    entityId: string;
+    summary: string;
+    createdAt: string;
+    evidenceIds: string[];
+    resultChanges: Array<{ nodeId: EvidenceNodeId; title: string; beforeStatus: string; afterStatus: string; beforeGap: string; afterGap: string; beforeDetail: string; afterDetail: string }>;
+    confirmationInvalidated: boolean;
+  }>;
   context: NodeId;
 };
 
 const labels: Record<NodeId, string> = { goal: '目标', task: '任务', milestone: '里程碑' };
 const requirementLevels: MinimumEvidenceLevel[] = ['E0', 'E1', 'E2', 'E3'];
+const revisionFields: Array<{ key: keyof EvidenceSnapshot; label: string }> = [
+  { key: 'text', label: '证据原文' },
+  { key: 'source', label: '来源' },
+  { key: 'reference', label: '引用' },
+  { key: 'observedAt', label: '证据时间' },
+  { key: 'links', label: '关联对象' },
+  { key: 'level', label: '证据等级' },
+  { key: 'reportSubmitted', label: '报告是否已提交' },
+  { key: 'benchmarkComplete', label: '完整基准测试' },
+  { key: 'latencyMs', label: '实测延迟（ms）' },
+];
 
 function date(value: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
+}
+
+function dateTimeInput(value: string) {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return '';
+  parsed.setMinutes(parsed.getMinutes() - parsed.getTimezoneOffset());
+  return parsed.toISOString().slice(0, 16);
+}
+
+function revisionValue(key: keyof EvidenceSnapshot, value: EvidenceSnapshot[keyof EvidenceSnapshot]) {
+  if (value === null) return '未说明';
+  if (key === 'links' && Array.isArray(value)) return value.map(id => labels[id as NodeId]).join('、');
+  if (key === 'reportSubmitted' || key === 'benchmarkComplete') return value ? '是' : '否';
+  if (key === 'observedAt' && typeof value === 'string') return date(value);
+  return String(value);
 }
 
 export default function Workspace() {
@@ -44,6 +80,8 @@ export default function Workspace() {
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
+  const [editingEvidence, setEditingEvidence] = useState<string | null>(null);
+  const [evidenceDraft, setEvidenceDraft] = useState<Evidence | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -111,6 +149,48 @@ export default function Workspace() {
     } finally {
       setSaving(false);
     }
+  }
+
+  function beginEvidenceEdit(evidence: Evidence) {
+    setEditingEvidence(evidence.id);
+    setEvidenceDraft({ ...evidence, observedAt: dateTimeInput(evidence.observedAt) });
+    setError('');
+  }
+
+  function updateEvidenceDraft(update: Partial<Evidence>) {
+    setEvidenceDraft(currentDraft => currentDraft ? { ...currentDraft, ...update } : currentDraft);
+  }
+
+  async function correctEvidence(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!evidenceDraft) return;
+    if (!evidenceDraft.links.length) {
+      setError('请至少保留一个关联对象。');
+      return;
+    }
+    setSaving(true);
+    try {
+      const response = await fetch('/api/evidence', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...evidenceDraft, observedAt: new Date(evidenceDraft.observedAt).toISOString() }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw Error(result.error || '无法更正证据');
+      setEditingEvidence(null);
+      setEvidenceDraft(null);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法更正证据');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function cancelEvidenceEdit() {
+    setEditingEvidence(null);
+    setEvidenceDraft(null);
+    setError('');
   }
 
   async function confirmMilestone() {
@@ -216,10 +296,50 @@ export default function Workspace() {
             <div className="evidence-list">
               {visible.map(evidence => (
                 <article key={evidence.id}>
-                  <div className="evidence-top"><span>{evidence.level} · {evidenceLevels[evidence.level].title} · {evidenceLevels[evidence.level].trust}</span><time>{date(evidence.observedAt)}</time></div>
-                  <p>{evidence.text}</p>
-                  <div className="evidence-foot">来源：{evidence.source} · 引用：{evidence.reference}</div>
-                  <div className="tags">{evidence.links.map(id => <span key={id}>{labels[id]}</span>)}</div>
+                  {editingEvidence === evidence.id && evidenceDraft ? (
+                    <form className="evidence-edit" onSubmit={event => void correctEvidence(event)}>
+                      <div className="evidence-edit-heading"><strong>更正证据</strong><span>保留原记录身份，并重新判定所有关联对象。</span></div>
+                      <label>证据原文<textarea required rows={4} value={evidenceDraft.text} onChange={event => updateEvidenceDraft({ text: event.target.value })} /></label>
+                      <div className="evidence-edit-grid">
+                        <label>来源<input required value={evidenceDraft.source} onChange={event => updateEvidenceDraft({ source: event.target.value })} /></label>
+                        <label>引用<input required value={evidenceDraft.reference} onChange={event => updateEvidenceDraft({ reference: event.target.value })} /></label>
+                        <label>证据时间<input required type="datetime-local" value={evidenceDraft.observedAt} onChange={event => updateEvidenceDraft({ observedAt: event.target.value })} /></label>
+                        <label>证据等级<select value={evidenceDraft.level} onChange={event => updateEvidenceDraft({ level: event.target.value as Evidence['level'] })}>
+                          {(['E1', 'E2', 'E3'] as const).map(level => <option key={level} value={level}>{level} · {evidenceLevels[level].title}</option>)}
+                        </select></label>
+                      </div>
+                      <fieldset className="evidence-links"><legend>关联对象</legend>
+                        {nodes.map(node => <label key={node.id}><input type="checkbox" checked={evidenceDraft.links.includes(node.id)} onChange={event => updateEvidenceDraft({ links: event.target.checked ? [...evidenceDraft.links, node.id] : evidenceDraft.links.filter(id => id !== node.id) })} />{node.type}：{node.title}</label>)}
+                      </fieldset>
+                      <div className="evidence-edit-grid">
+                        {evidenceDraft.links.includes('task') && <label>报告是否已提交<select value={evidenceDraft.reportSubmitted === null ? 'unknown' : evidenceDraft.reportSubmitted ? 'yes' : 'no'} onChange={event => updateEvidenceDraft({ reportSubmitted: event.target.value === 'unknown' ? null : event.target.value === 'yes' })}><option value="unknown">证据未说明</option><option value="yes">是</option><option value="no">否</option></select></label>}
+                        {evidenceDraft.links.includes('milestone') && <>
+                          <label>是否完成完整基准测试<select value={evidenceDraft.benchmarkComplete === null ? 'unknown' : evidenceDraft.benchmarkComplete ? 'yes' : 'no'} onChange={event => updateEvidenceDraft({ benchmarkComplete: event.target.value === 'unknown' ? null : event.target.value === 'yes' })}><option value="unknown">证据未说明</option><option value="yes">是</option><option value="no">否</option></select></label>
+                          <label>实测延迟（ms）<input type="number" min="0" step="any" value={evidenceDraft.latencyMs ?? ''} onChange={event => updateEvidenceDraft({ latencyMs: event.target.value === '' ? null : Number(event.target.value) })} /></label>
+                        </>}
+                      </div>
+                      <div className="evidence-edit-actions"><button type="button" className="secondary-button" disabled={saving} onClick={cancelEvidenceEdit}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? '保存中…' : '保存更正并重判'}</button></div>
+                    </form>
+                  ) : <>
+                    <div className="evidence-top">
+                      <span>{evidence.level} · {evidenceLevels[evidence.level].title} · {evidenceLevels[evidence.level].trust}{Boolean(evidence.revisionCount) && <em className="corrected-badge">已更正 {evidence.revisionCount} 次</em>}</span>
+                      <div className="evidence-actions"><time>{date(evidence.observedAt)}</time><button type="button" className="edit-evidence-button" aria-label={`更正证据：${evidence.reference}`} onClick={() => beginEvidenceEdit(evidence)}>更正</button></div>
+                    </div>
+                    {Boolean(evidence.lastCorrectedAt) && <div className="evidence-revision-time">最近更正：{date(evidence.lastCorrectedAt!)}</div>}
+                    <p>{evidence.text}</p>
+                    <div className="evidence-foot">来源：{evidence.source} · 引用：{evidence.reference}</div>
+                    <div className="tags">{evidence.links.map(id => <span key={id}>{labels[id]}</span>)}</div>
+                    {Boolean(evidence.revisions?.length) && <details className="evidence-history">
+                      <summary>查看更正记录（{evidence.revisions!.length}）</summary>
+                      <ol>{evidence.revisions!.map((revision, revisionIndex) => {
+                        const changedFields = revisionFields.filter(({ key }) => JSON.stringify(revision.before[key]) !== JSON.stringify(revision.after[key]));
+                        return <li key={`${revision.changedAt}-${revisionIndex}`}>
+                          <time>{date(revision.changedAt)}</time>
+                          {changedFields.map(({ key, label }) => <p key={key}><strong>{label}</strong><span>原：{revisionValue(key, revision.before[key])}</span><span>更正为：{revisionValue(key, revision.after[key])}</span></p>)}
+                        </li>;
+                      })}</ol>
+                    </details>}
+                  </>}
                 </article>
               ))}
             </div>
@@ -279,8 +399,19 @@ export default function Workspace() {
           <section className="change-log" aria-labelledby="change-log-title">
             <div className="result-label"><h3 id="change-log-title">变更记录</h3><span>{graph?.changes.length ?? 0}</span></div>
             {graph?.changes.length ? (
-              <ul>{graph.changes.map(change => <li key={change.id}><span>{change.summary}</span><time>{date(change.createdAt)}</time></li>)}</ul>
-            ) : <p>尚无里程碑确认记录。</p>}
+              <ul>{graph.changes.map(change => <li key={change.id}>
+                <span>{change.summary}</span>
+                {change.resultChanges.map(result => <div className="change-outcome" key={result.nodeId}>
+                  <strong>{result.title}：{result.beforeStatus} → {result.afterStatus}</strong>
+                  {result.beforeDetail !== result.afterDetail && <span>判定说明：{result.beforeDetail} → {result.afterDetail}</span>}
+                  {result.beforeGap !== result.afterGap && <span>判定缺口：{result.beforeGap} → {result.afterGap}</span>}
+                  {result.beforeGap === result.afterGap && <span>判定缺口：{result.afterGap}</span>}
+                </div>)}
+                {change.eventType === 'evidence.corrected' && !change.resultChanges.length && <span className="change-outcome">关联对象的结论与缺口没有变化。</span>}
+                {change.confirmationInvalidated && <span className="confirmation-reset">原里程碑确认已撤销，请重新核对并确认。</span>}
+                <time>{date(change.createdAt)}</time>
+              </li>)}</ul>
+            ) : <p>尚无证据更正或里程碑确认记录。</p>}
           </section>
           <div className="hint"><span>✳</span><p><strong>执行完成与目标进展分开判断</strong><br />保存行动完成不会自动提高能力或里程碑判定。</p></div>
         </div>

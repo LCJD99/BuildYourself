@@ -14,7 +14,21 @@ export const evidenceLevels: Record<MinimumEvidenceLevel, { title: string; trust
   E3: { title: '外部专业反馈', trust: '高可信度' },
 };
 export const defaultEvidenceRequirements: Record<EvidenceNodeId, MinimumEvidenceLevel> = { task: 'E1', milestone: 'E2' };
-export type Evidence = { id: string; text: string; source: string; reference: string; observedAt: string; createdAt: string; links: NodeId[]; level: EvidenceLevel; reportSubmitted: boolean | null; latencyMs: number | null; benchmarkComplete: boolean | null };
+export type EvidenceSnapshot = {
+  id: string;
+  text: string;
+  source: string;
+  reference: string;
+  observedAt: string;
+  createdAt: string;
+  links: NodeId[];
+  level: EvidenceLevel;
+  reportSubmitted: boolean | null;
+  latencyMs: number | null;
+  benchmarkComplete: boolean | null;
+};
+export type EvidenceRevision = { changedAt: string; before: EvidenceSnapshot; after: EvidenceSnapshot };
+export type Evidence = EvidenceSnapshot & { revisionCount?: number; lastCorrectedAt?: string | null; revisions?: EvidenceRevision[] };
 export type Result = { title: string; status: string; tone: 'success' | 'warning' | 'neutral'; standard: string; detail: string; gap: string; evidence: Evidence[] };
 export type EvidenceAssessment = { nodeId: EvidenceNodeId; requiredLevel: MinimumEvidenceLevel; status: '无需证据' | '证据不足' | '证据充足'; summary: string; gap: string; highestLevel: EvidenceLevel | null; evidence: Evidence[] };
 export type TaskExecution = { completedAt: string | null };

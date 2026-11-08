@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evaluateMilestone } from '../lib/milestone-review';
-import { confirmMilestone, getMilestoneConfirmation, listMilestoneChanges } from '../lib/milestone-store';
+import { confirmMilestone, correctEvidence, getMilestoneConfirmation, listChangeEvents, listMilestoneChanges } from '../lib/milestone-store';
 import { listEvidence, saveEvidence } from '../lib/store';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-milestone-test-'));
@@ -51,5 +51,46 @@ describe('里程碑确认记录', () => {
     expect(result.created).toBe(true);
     expect(result.confirmation.evidenceIds).toEqual([evidence.id]);
     expect(listMilestoneChanges()).toHaveLength(2);
+  });
+
+  it('更正同一份证据会重算所有引用判定并撤销过期的里程碑确认', () => {
+    const evidenceCount = listEvidence().length;
+    const evidence = saveEvidence({
+      text: '报告已提交，延迟 199 ms',
+      source: '基准测试报告',
+      reference: 'report',
+      observedAt: '2026-11-08T12:03:00.000Z',
+      links: ['task', 'milestone'],
+      level: 'E2',
+      reportSubmitted: true,
+      latencyMs: 199,
+      benchmarkComplete: true,
+    });
+    confirmMilestone('milestone');
+
+    const corrected = correctEvidence(evidence.id, {
+      text: '报告尚未提交，延迟 230 ms',
+      source: '基准测试报告（更正）',
+      reference: 'report corrected',
+      observedAt: '2026-11-08T12:03:00.000Z',
+      links: ['task', 'milestone'],
+      level: 'E2',
+      reportSubmitted: false,
+      latencyMs: 230,
+      benchmarkComplete: true,
+    });
+
+    expect(corrected.evidence).toMatchObject({ id: evidence.id, text: '报告尚未提交，延迟 230 ms', revisionCount: 1 });
+    expect(corrected.evidence.revisions?.[0]).toMatchObject({ before: { text: '报告已提交，延迟 199 ms' }, after: { text: '报告尚未提交，延迟 230 ms' } });
+    expect(corrected.confirmationInvalidated).toBe(true);
+    expect(getMilestoneConfirmation()).toBeNull();
+    expect(evaluateMilestone(listEvidence(), getMilestoneConfirmation()).status).toBe('本次实测未达标');
+    expect(corrected.resultChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: '交付', beforeStatus: '交付已验收', afterStatus: '证据不足' }),
+      expect.objectContaining({ title: '里程碑', beforeStatus: '已确认达成', afterStatus: '本次实测未达标' }),
+    ]));
+    expect(listEvidence()).toHaveLength(evidenceCount + 1);
+    expect(listEvidence().find(item => item.id === evidence.id)?.createdAt).toBe(evidence.createdAt);
+    expect(listChangeEvents()[0]).toMatchObject({ eventType: 'evidence.corrected', evidenceIds: [evidence.id], confirmationInvalidated: true });
   });
 });

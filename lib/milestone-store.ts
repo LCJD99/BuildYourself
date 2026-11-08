@@ -1,17 +1,33 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { nodes } from './model';
+import { evaluate, nodes, type Evidence, type EvidenceNodeId, type Result } from './model';
 import { evaluateMilestone, type MilestoneConfirmation } from './milestone-review';
-import { openDatabase, readEvidence } from './store';
+import { openDatabase, readEvidence, validateEvidenceInput, type EvidenceInput } from './store';
 
-export type MilestoneChangeEvent = {
+export type ResultChange = {
+  nodeId: EvidenceNodeId;
+  title: string;
+  beforeStatus: string;
+  afterStatus: string;
+  beforeGap: string;
+  afterGap: string;
+  beforeDetail: string;
+  afterDetail: string;
+};
+
+export type ChangeEvent = {
   id: string;
-  eventType: 'milestone.confirmed';
-  entityId: 'milestone';
+  eventType: 'milestone.confirmed' | 'evidence.corrected';
+  entityId: string;
   summary: string;
   createdAt: string;
   evidenceIds: string[];
+  resultChanges: ResultChange[];
+  confirmationInvalidated: boolean;
 };
+export type MilestoneChangeEvent = ChangeEvent & { eventType: 'milestone.confirmed'; entityId: 'milestone' };
+type EvidenceOutcome = Pick<Result, 'title' | 'status' | 'gap' | 'detail'> & { nodeId: EvidenceNodeId };
+export type EvidenceCorrection = { evidence: Evidence; changed: boolean; resultChanges: ResultChange[]; confirmationInvalidated: boolean };
 
 function db() {
   const database = openDatabase();
@@ -28,6 +44,8 @@ function db() {
       created_at TEXT NOT NULL,
       evidence_ids TEXT NOT NULL
     );`);
+  const eventColumns = database.prepare('PRAGMA table_info(change_events)').all() as { name: string }[];
+  if (!eventColumns.some(column => column.name === 'details')) database.exec("ALTER TABLE change_events ADD COLUMN details TEXT NOT NULL DEFAULT '{}'");
   return database;
 }
 
@@ -92,19 +110,140 @@ export function confirmMilestone(id: unknown): { confirmation: MilestoneConfirma
   }
 }
 
-export function listMilestoneChanges(): MilestoneChangeEvent[] {
+function outcomes(evidence: Evidence[], confirmation: MilestoneConfirmation | null): EvidenceOutcome[] {
+  const task = evaluate(evidence)[0];
+  const milestone = evaluateMilestone(evidence, confirmation);
+  return [
+    { nodeId: 'task', title: task.title, status: task.status, gap: task.gap, detail: task.detail },
+    { nodeId: 'milestone', title: milestone.title, status: milestone.status, gap: milestone.gap, detail: milestone.detail },
+  ];
+}
+
+function changedOutcomes(before: EvidenceOutcome[], after: EvidenceOutcome[]): ResultChange[] {
+  return before.flatMap((oldOutcome, index) => {
+    const next = after[index];
+    if (oldOutcome.status === next.status && oldOutcome.gap === next.gap && oldOutcome.detail === next.detail) return [];
+    return [{
+      nodeId: oldOutcome.nodeId,
+      title: oldOutcome.title,
+      beforeStatus: oldOutcome.status,
+      afterStatus: next.status,
+      beforeGap: oldOutcome.gap,
+      afterGap: next.gap,
+      beforeDetail: oldOutcome.detail,
+      afterDetail: next.detail,
+    }];
+  });
+}
+
+function snapshot(evidence: Evidence) {
+  return {
+    id: evidence.id,
+    text: evidence.text,
+    source: evidence.source,
+    reference: evidence.reference,
+    observedAt: evidence.observedAt,
+    createdAt: evidence.createdAt,
+    links: nodes.filter(node => evidence.links.includes(node.id)).map(node => node.id),
+    level: evidence.level,
+    reportSubmitted: evidence.reportSubmitted,
+    latencyMs: evidence.latencyMs,
+    benchmarkComplete: evidence.benchmarkComplete,
+  };
+}
+
+function sameEvidence(current: Evidence, next: EvidenceInput) {
+  const sameLinks = [...current.links].sort().join(',') === [...next.links].sort().join(',');
+  return current.text === next.text
+    && current.source === next.source
+    && current.reference === next.reference
+    && current.observedAt === next.observedAt
+    && sameLinks
+    && current.level === next.level
+    && current.reportSubmitted === next.reportSubmitted
+    && current.latencyMs === next.latencyMs
+    && current.benchmarkComplete === next.benchmarkComplete;
+}
+
+export function correctEvidence(id: unknown, input: unknown): EvidenceCorrection {
+  if (typeof id !== 'string' || !id) throw new Error('请选择有效的证据');
+  const nextInput = validateEvidenceInput(input);
   const database = db();
+  let inTransaction = false;
   try {
-    const rows = database.prepare("SELECT * FROM change_events WHERE event_type='milestone.confirmed' ORDER BY created_at DESC").all() as Record<string, unknown>[];
-    return rows.map(row => ({
-      id: String(row.id),
-      eventType: 'milestone.confirmed',
-      entityId: 'milestone',
-      summary: String(row.summary),
-      createdAt: String(row.created_at),
-      evidenceIds: JSON.parse(String(row.evidence_ids)) as string[],
-    }));
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const beforeEvidence = readEvidence(database);
+    const current = beforeEvidence.find(item => item.id === id);
+    if (!current) throw new Error('证据不存在或已被删除');
+    if (sameEvidence(current, nextInput)) {
+      database.exec('COMMIT');
+      inTransaction = false;
+      return { evidence: current, changed: false, resultChanges: [], confirmationInvalidated: false };
+    }
+
+    const confirmationBefore = readConfirmation(database);
+    const beforeOutcomes = outcomes(beforeEvidence, confirmationBefore);
+    const changedAt = new Date().toISOString();
+    const beforeSnapshot = snapshot(current);
+    database.prepare(`UPDATE evidence SET text=?, source=?, reference=?, observed_at=?, report_submitted=?, latency_ms=?, benchmark_complete=?, level=? WHERE id=?`)
+      .run(nextInput.text, nextInput.source, nextInput.reference, nextInput.observedAt, nextInput.reportSubmitted === null ? null : Number(nextInput.reportSubmitted), nextInput.latencyMs, nextInput.benchmarkComplete === null ? null : Number(nextInput.benchmarkComplete), nextInput.level, id);
+    database.prepare('DELETE FROM evidence_links WHERE evidence_id=?').run(id);
+    const insertLink = database.prepare('INSERT INTO evidence_links(evidence_id,node_id) VALUES (?,?)');
+    for (const link of nextInput.links) insertLink.run(id, link);
+
+    const confirmationInvalidated = Boolean(confirmationBefore?.evidenceIds.includes(id));
+    if (confirmationInvalidated) database.prepare("DELETE FROM milestone_confirmations WHERE node_id='milestone'").run();
+    const afterEvidence = readEvidence(database);
+    const updated = afterEvidence.find(item => item.id === id)!;
+    const confirmationAfter = confirmationInvalidated ? null : confirmationBefore;
+    const resultChanges = changedOutcomes(beforeOutcomes, outcomes(afterEvidence, confirmationAfter));
+    const afterSnapshot = snapshot(updated);
+    database.prepare('INSERT INTO evidence_revisions(id,evidence_id,changed_at,before_json,after_json) VALUES (?,?,?,?,?)')
+      .run(randomUUID(), id, changedAt, JSON.stringify(beforeSnapshot), JSON.stringify(afterSnapshot));
+    const summary = `证据「${current.reference}」已更正，记录身份保持不变。`;
+    const details = JSON.stringify({ resultChanges, confirmationInvalidated });
+    database.prepare(`INSERT INTO change_events(id,event_type,entity_id,summary,created_at,evidence_ids,details)
+      VALUES (?,'evidence.corrected',?,?,?,?,?)`)
+      .run(randomUUID(), id, summary, changedAt, JSON.stringify([id]), details);
+    database.exec('COMMIT');
+    inTransaction = false;
+    return { evidence: readEvidence(database).find(item => item.id === id)!, changed: true, resultChanges, confirmationInvalidated };
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
   } finally {
     database.close();
   }
+}
+
+export function listChangeEvents(): ChangeEvent[] {
+  const database = db();
+  try {
+    const rows = database.prepare('SELECT * FROM change_events ORDER BY created_at DESC').all() as Record<string, unknown>[];
+    return rows.map(row => {
+      let details: { resultChanges?: ResultChange[]; confirmationInvalidated?: boolean } = {};
+      try {
+        details = JSON.parse(String(row.details ?? '{}')) as typeof details;
+      } catch {
+        details = {};
+      }
+      return {
+      id: String(row.id),
+      eventType: row.event_type === 'evidence.corrected' ? 'evidence.corrected' : 'milestone.confirmed',
+      entityId: String(row.entity_id),
+      summary: String(row.summary),
+      createdAt: String(row.created_at),
+      evidenceIds: JSON.parse(String(row.evidence_ids)) as string[],
+      resultChanges: details.resultChanges ?? [],
+      confirmationInvalidated: details.confirmationInvalidated ?? false,
+    };
+    });
+  } finally {
+    database.close();
+  }
+}
+
+export function listMilestoneChanges(): MilestoneChangeEvent[] {
+  return listChangeEvents().filter((event): event is MilestoneChangeEvent => event.eventType === 'milestone.confirmed');
 }

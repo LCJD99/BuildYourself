@@ -1,7 +1,7 @@
 import { assessEvidence, nodes, evaluate } from '@/lib/model';
 import { getContext, getEvidenceRequirements, getTaskExecution, listEvidence } from '@/lib/store';
 import { evaluateMilestone } from '@/lib/milestone-review';
-import { getMilestoneConfirmation, listMilestoneChanges } from '@/lib/milestone-store';
+import { getMilestoneConfirmation, listChangeEvents } from '@/lib/milestone-store';
 export const dynamic = 'force-dynamic';
 export function GET() {
   const evidence=listEvidence();
@@ -19,7 +19,7 @@ export function GET() {
     requirements,
     taskExecution:getTaskExecution(),
     milestoneConfirmation:confirmation,
-    changes:listMilestoneChanges(),
+    changes:listChangeEvents(),
     context:getContext(),
   });
 }
