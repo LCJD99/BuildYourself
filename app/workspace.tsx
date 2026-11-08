@@ -13,6 +13,7 @@ import {
   type Result,
   type TaskExecution,
 } from '@/lib/model';
+import GoalPlansPanel from './goal-plans-panel';
 
 type Graph = {
   evidence: Evidence[];
@@ -251,6 +252,8 @@ export default function Workspace() {
           <div className="meta">
             <span>◉ &nbsp; 活跃中</span><span>◇ &nbsp; 1 个里程碑</span><span>◷ &nbsp; {graph?.evidence.length ?? 0} 条证据</span>
           </div>
+
+          <GoalPlansPanel />
 
           {selected === 'task' && (
             <section className="execution-panel" aria-labelledby="execution-title">
