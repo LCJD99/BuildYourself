@@ -12,6 +12,12 @@ export default function(pi) {
    const links=[primary.id];
    for(const n of available.filter(n=>n.id!==primary.id)){if(await ctx.ui.confirm('补充关联',`同时关联${n.type}「${n.title}」？`)) links.push(n.id);}
    const text=args.trim() || await ctx.ui.editor('证据原文',''); if(!text?.trim())return;
+   const levelChoice=await ctx.ui.select('证据等级（按材料类型选择）',[
+    'E1：用户自报（低可信度）',
+    'E2：可验证产出（中可信度）',
+    'E3：外部专业反馈（高可信度）',
+   ]); if(!levelChoice)return;
+   const level=levelChoice.slice(0,2);
    const source=await ctx.ui.input('证据来源（例如：用户反馈）','用户反馈'); if(!source?.trim())return;
    const reference=await ctx.ui.input('证据引用（例如：报告路径或链接；没有外部引用可填“本条反馈”）','本条反馈'); if(!reference?.trim())return;
    const observed=await ctx.ui.input('证据时间（ISO 格式；留空使用当前时间）',new Date().toISOString()); if(observed===undefined)return;
@@ -19,9 +25,9 @@ export default function(pi) {
    let reportSubmitted=null, benchmarkComplete=null, latencyMs=null;
    if(links.includes('task')){const choice=await ctx.ui.select('核对：报告是否按要求提交？',['是','否','证据未说明']); if(!choice)return; reportSubmitted=choice==='证据未说明'?null:choice==='是';}
    if(links.includes('milestone')){const choice=await ctx.ui.select('核对：是否完成完整基准测试？',['是','否','证据未说明']); if(!choice)return; benchmarkComplete=choice==='证据未说明'?null:choice==='是'; const value=await ctx.ui.input('核对实测延迟（ms；无测量请留空）',''); if(value===undefined)return; if(value.trim()){latencyMs=Number(value); if(!Number.isFinite(latencyMs)||latencyMs<0)throw new Error('延迟必须是非负数');}}
-   const summary=`原文：${text}\n来源：${source}\n引用：${reference}\n时间：${observedAt}\n关联：${links.map(id=>available.find(n=>n.id===id).title).join('、')}\n报告已提交：${reportSubmitted===null?'未说明':reportSubmitted?'是':'否'}\n完整基准测试：${benchmarkComplete===null?'未说明':benchmarkComplete?'是':'否'}\n延迟：${latencyMs===null?'未提供':`${latencyMs} ms`}`;
+   const summary=`原文：${text}\n证据等级：${levelChoice}\n来源：${source}\n引用：${reference}\n时间：${observedAt}\n关联：${links.map(id=>available.find(n=>n.id===id).title).join('、')}\n报告已提交：${reportSubmitted===null?'未说明':reportSubmitted?'是':'否'}\n完整基准测试：${benchmarkComplete===null?'未说明':benchmarkComplete?'是':'否'}\n延迟：${latencyMs===null?'未提供':`${latencyMs} ms`}`;
    if(!await ctx.ui.confirm('核对并保存证据',summary))return;
-   await api('/api/evidence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,source,reference,observedAt,links,reportSubmitted,benchmarkComplete,latencyMs})});
+   await api('/api/evidence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,source,reference,observedAt,links,level,reportSubmitted,benchmarkComplete,latencyMs})});
    ctx.ui.notify('证据已保存，可在浏览器查看独立判定。','info');
   }catch(e){ctx.ui.notify(`证据未保存：${e.message}`,'error');}
  }});

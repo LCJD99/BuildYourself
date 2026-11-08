@@ -4,8 +4,46 @@ export const nodes = [
   { id: 'milestone', type: '里程碑', title: '响应延迟低于 200 ms', parent: 'goal', description: '完整基准测试的实测延迟严格低于 200 ms。' },
 ] as const;
 export type NodeId = typeof nodes[number]['id'];
-export type Evidence = { id: string; text: string; source: string; reference: string; observedAt: string; createdAt: string; links: NodeId[]; reportSubmitted: boolean | null; latencyMs: number | null; benchmarkComplete: boolean | null };
+export type EvidenceNodeId = Extract<NodeId, 'task' | 'milestone'>;
+export type EvidenceLevel = 'E1' | 'E2' | 'E3';
+export type MinimumEvidenceLevel = 'E0' | EvidenceLevel;
+export const evidenceLevels: Record<MinimumEvidenceLevel, { title: string; trust: string }> = {
+  E0: { title: '无需证据', trust: '仅执行状态' },
+  E1: { title: '用户自报', trust: '低可信度' },
+  E2: { title: '可验证产出', trust: '中可信度' },
+  E3: { title: '外部专业反馈', trust: '高可信度' },
+};
+export const defaultEvidenceRequirements: Record<EvidenceNodeId, MinimumEvidenceLevel> = { task: 'E1', milestone: 'E2' };
+export type Evidence = { id: string; text: string; source: string; reference: string; observedAt: string; createdAt: string; links: NodeId[]; level: EvidenceLevel; reportSubmitted: boolean | null; latencyMs: number | null; benchmarkComplete: boolean | null };
 export type Result = { title: string; status: string; tone: 'success' | 'warning' | 'neutral'; standard: string; detail: string; gap: string; evidence: Evidence[] };
+export type EvidenceAssessment = { nodeId: EvidenceNodeId; requiredLevel: MinimumEvidenceLevel; status: '无需证据' | '证据不足' | '证据充足'; summary: string; gap: string; highestLevel: EvidenceLevel | null; evidence: Evidence[] };
+export type TaskExecution = { completedAt: string | null };
+
+const evidenceRanks: Record<MinimumEvidenceLevel, number> = { E0: 0, E1: 1, E2: 2, E3: 3 };
+export function isEvidenceLevel(value: unknown): value is EvidenceLevel {
+  return value === 'E1' || value === 'E2' || value === 'E3';
+}
+export function isMinimumEvidenceLevel(value: unknown): value is MinimumEvidenceLevel {
+  return value === 'E0' || isEvidenceLevel(value);
+}
+export function assessEvidence(evidence: Evidence[], nodeId: EvidenceNodeId, requiredLevel: MinimumEvidenceLevel): EvidenceAssessment {
+  const linked = evidence.filter(item => item.links.includes(nodeId));
+  const highestLevel = linked.reduce<EvidenceLevel | null>((highest, item) => !highest || evidenceRanks[item.level] > evidenceRanks[highest] ? item.level : highest, null);
+  if (requiredLevel === 'E0') {
+    return { nodeId, requiredLevel, status: '无需证据', summary: '此对象设置为无需附加证据。', gap: '无', highestLevel, evidence: linked };
+  }
+  const qualified = linked.filter(item => evidenceRanks[item.level] >= evidenceRanks[requiredLevel]);
+  if (qualified.length) {
+    const best = qualified.reduce((current, item) => evidenceRanks[item.level] > evidenceRanks[current.level] ? item : current);
+    return { nodeId, requiredLevel, status: '证据充足', summary: `已有 ${best.level}（${evidenceLevels[best.level].title}）证据，达到最低要求。`, gap: '无', highestLevel, evidence: linked };
+  }
+  const required = `${requiredLevel}（${evidenceLevels[requiredLevel].title}）`;
+  const gap = highestLevel
+    ? `当前最高为 ${highestLevel}（${evidenceLevels[highestLevel].title}），还需 ${required} 或更高等级证据。`
+    : `缺少 ${required} 或更高等级证据。`;
+  return { nodeId, requiredLevel, status: '证据不足', summary: highestLevel ? `当前证据未达到 ${required}。` : '尚无关联证据。', gap, highestLevel, evidence: linked };
+}
+
 export function evaluate(evidence: Evidence[]): Result[] {
   const task = evidence.filter(e => e.links.includes('task'));
   const milestone = evidence.filter(e => e.links.includes('milestone'));
