@@ -7,3 +7,7 @@ Issues are tracked in GitHub Issues and written in Chinese. See `docs/agents/iss
 ### Domain docs
 
 This repository uses a single-context layout. See `docs/agents/domain.md`.
+
+## Git commits
+
+Write all commit messages in English.

@@ -3,3 +3,8 @@ node_modules/
 .next/
 *.tsbuildinfo
 data/
+out/
+build/
+dist/
+coverage/
+next-env.d.ts
