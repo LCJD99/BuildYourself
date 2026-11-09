@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from './store';
 import { recordTaskChange } from './milestone-store';
+import type { ActionPriority } from './daily-planner';
 
 export type GoalDomain = 'learning' | 'fitness' | 'project' | 'general';
 export type GoalPlanStatus = 'draft' | 'active' | 'paused' | 'completed' | 'archived' | 'abandoned';
@@ -27,6 +28,10 @@ export type GoalActionDraft = {
   title: string | null;
   details: string | null;
   estimateMinutes: number | null;
+  priority: ActionPriority;
+  hardDeadline: string | null;
+  milestoneId: string | null;
+  dependsOn: string[];
   specificity: 'concrete' | 'draft';
 };
 
@@ -86,6 +91,12 @@ export type GoalPlanAction = {
   dependencyIds: string[];
   successCriteria: string | null;
   evidenceRequirement: string | null;
+  priority: ActionPriority;
+  hardDeadline: string | null;
+  milestoneId: string | null;
+  milestoneTitle: string | null;
+  milestoneCriteria: string | null;
+  dependsOn: string[];
   status: 'pending_schedule' | 'scheduled' | 'done';
   createdAt: string;
   updatedAt: string;
@@ -155,14 +166,32 @@ function normalizeDraft(input: unknown): GoalPlanDraft {
     if (estimate !== undefined && estimate !== null && (typeof estimate !== 'number' || !Number.isInteger(estimate) || estimate < 1 || estimate > 10080)) {
       throw new Error('行动预计时长必须是 1 到 10080 分钟的整数');
     }
+    const hardDeadline = nullableText(item.hardDeadline, '行动硬截止日期', 10);
+    const deadlineDate = hardDeadline && /^\d{4}-\d{2}-\d{2}$/.test(hardDeadline) ? new Date(`${hardDeadline}T00:00:00.000Z`) : null;
+    if (hardDeadline && (!deadlineDate || !Number.isFinite(deadlineDate.getTime()) || deadlineDate.toISOString().slice(0, 10) !== hardDeadline)) throw new Error('行动硬截止日期必须是有效的 YYYY-MM-DD 日期');
+    const dependencyIds = list(item.dependsOn, '行动依赖').map((dependency, dependencyIndex) => {
+      if (typeof dependency !== 'string' || !dependency.trim() || dependency.length > 100) throw new Error(`行动依赖 ${dependencyIndex + 1} 无效`);
+      return dependency.trim();
+    });
+    if (new Set(dependencyIds).size !== dependencyIds.length) throw new Error('行动依赖不能重复');
     return {
       id: nullableText(item.id, '行动 ID', 100) ?? randomUUID(),
       title: nullableText(item.title, '行动名称', 240),
       details: nullableText(item.details, '行动说明'),
       estimateMinutes: typeof estimate === 'number' ? estimate : null,
+      priority: choice(item.priority, new Set<ActionPriority>(['high', 'medium', 'low']), 'medium', '行动优先级'),
+      hardDeadline,
+      milestoneId: nullableText(item.milestoneId, '关联里程碑 ID', 100),
+      dependsOn: dependencyIds,
       specificity: choice(item.specificity, new Set<'concrete' | 'draft'>(['concrete', 'draft']), 'draft', '行动具体程度'),
     };
   });
+  const nearMilestones = milestones.filter(milestone => milestone.stage === 'near');
+  const inferredMilestones = nearMilestones.length ? nearMilestones : milestones;
+  for (const action of nextActions) {
+    if (action.milestoneId && !milestones.some(milestone => milestone.id === action.milestoneId)) throw new Error(`行动「${action.title ?? '未命名'}」关联了不存在的里程碑`);
+    if (!action.milestoneId && inferredMilestones.length === 1) action.milestoneId = inferredMilestones[0].id;
+  }
   const constraintsInput = value.constraints === undefined ? {} : object(value.constraints, '约束');
   const constraintsStatus = choice(constraintsInput.status, new Set<'confirmed' | 'needs_clarification'>(['confirmed', 'needs_clarification']), 'needs_clarification', '约束确认状态');
   const constraints = list(constraintsInput.items, '约束事项').map((entry, index) => {
@@ -235,6 +264,16 @@ export function validateGoalPlan(plan: GoalPlanDraft): GoalPlanValidation {
   if (!plan.nextActions.some(action => action.title && action.specificity === 'concrete')) {
     issues.push('至少需要一项具体、可执行的近期行动。');
   }
+  const actionIds = new Set(plan.nextActions.map(action => action.id));
+  if (actionIds.size !== plan.nextActions.length) issues.push('近期行动 ID 不能重复。');
+  for (const action of plan.nextActions) {
+    if (action.dependsOn.includes(action.id)) issues.push(`行动「${action.title ?? '未命名'}」不能依赖自身。`);
+    for (const dependency of action.dependsOn) {
+      const dependedAction = plan.nextActions.find(candidate => candidate.id === dependency);
+      if (!dependedAction) issues.push(`行动「${action.title ?? '未命名'}」依赖的行动不存在。`);
+      else if (dependedAction.specificity !== 'concrete' || !dependedAction.title) issues.push(`行动「${action.title ?? '未命名'}」依赖的行动尚未具体化。`);
+    }
+  }
   if (plan.evidenceRequirements.length === 0 || !plan.evidenceRequirements.some(item => item.item && item.description && item.minimumLevel)) {
     issues.push('需要至少一项写明对象、内容和最低等级的证据要求。');
   }
@@ -291,6 +330,8 @@ function ensureSchema() {
       details TEXT,
       estimate_minutes INTEGER,
       status TEXT NOT NULL CHECK (status IN ('pending_schedule', 'scheduled', 'done')),
+      priority TEXT NOT NULL DEFAULT 'medium',
+      milestone_id TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS goal_plan_events (
@@ -309,6 +350,9 @@ function ensureSchema() {
       requested_at TEXT NOT NULL
     );
   `);
+  const schedulingColumns = new Set((database.prepare('PRAGMA table_info(goal_plan_actions)').all() as Array<{ name: string }>).map(column => column.name));
+  if (!schedulingColumns.has('priority')) database.exec("ALTER TABLE goal_plan_actions ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium'");
+  if (!schedulingColumns.has('milestone_id')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN milestone_id TEXT');
   if (migrated) {
     const legacyPlans = database.prepare('SELECT id, status, updated_at FROM goal_plans').all() as { id: string; status: GoalPlanStatus; updated_at: string }[];
     const insertEvent = database.prepare(`INSERT INTO goal_plan_events (id, goal_plan_id, from_status, to_status, action, reason, evidence_json, created_at)
@@ -325,6 +369,12 @@ function ensureSchema() {
   if (!existingColumns.has('updated_at')) {
     database.exec('ALTER TABLE goal_plan_actions ADD COLUMN updated_at TEXT');
     database.exec('UPDATE goal_plan_actions SET updated_at=created_at WHERE updated_at IS NULL');
+  }
+  if (existingColumns.has('hard_deadline')) {
+    database.exec('UPDATE goal_plan_actions SET deadline=hard_deadline WHERE deadline IS NULL AND hard_deadline IS NOT NULL');
+  }
+  if (existingColumns.has('dependencies_json')) {
+    database.exec("UPDATE goal_plan_actions SET dependency_ids=dependencies_json WHERE dependency_ids='[]' AND dependencies_json<>'[]'");
   }
   return database;
 }
@@ -358,7 +408,7 @@ function appendEvent(database: ReturnType<typeof openDatabase>, goalPlanId: stri
 }
 
 function toGoalPlan(row: GoalPlanRow, lifecycleEvents: GoalPlanEvent[] = [], pendingCompletion: PendingGoalCompletion | null = null): GoalPlan {
-  const plan = JSON.parse(row.plan_json) as GoalPlanDraft;
+  const plan = normalizeDraft(JSON.parse(row.plan_json));
   return { ...plan, id: row.id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, activatedAt: row.activated_at, completedAt: row.completed_at, lifecycleReason: row.lifecycle_reason, lifecycleEvents, pendingCompletion, validation: validateGoalPlan(plan) };
 }
 
@@ -444,6 +494,12 @@ function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
   } catch {
     dependencyIds = [];
   }
+  const storedPlan = JSON.parse(String(row.plan_json)) as Partial<GoalPlanDraft>;
+  const milestones = Array.isArray(storedPlan.milestones) ? storedPlan.milestones : [];
+  const storedMilestoneId = row.milestone_id === null || row.milestone_id === undefined ? null : String(row.milestone_id);
+  const nearMilestones = milestones.filter(item => item.stage === 'near');
+  const milestone = milestones.find(item => item.id === storedMilestoneId)
+    ?? (!storedMilestoneId && nearMilestones.length === 1 ? nearMilestones[0] : null);
   return {
     id: String(row.id),
     goalPlanId: String(row.goal_plan_id),
@@ -454,6 +510,12 @@ function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
     deadline: row.deadline === null ? null : String(row.deadline),
     estimateMinutes: row.estimate_minutes === null ? null : Number(row.estimate_minutes),
     dependencyIds,
+    priority: row.priority === 'high' || row.priority === 'low' ? row.priority : 'medium',
+    hardDeadline: row.deadline === null ? null : String(row.deadline),
+    milestoneId: storedMilestoneId ?? milestone?.id ?? null,
+    milestoneTitle: milestone?.title ?? null,
+    milestoneCriteria: milestone?.successCriteria ?? null,
+    dependsOn: dependencyIds,
     successCriteria: row.success_criteria === null ? null : String(row.success_criteria),
     evidenceRequirement: row.evidence_requirement === null ? null : String(row.evidence_requirement),
     status: row.status === 'scheduled' || row.status === 'done' ? row.status : 'pending_schedule',
@@ -463,8 +525,9 @@ function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
 }
 
 const actionSelect = `SELECT a.id, a.goal_plan_id, a.title, a.details, a.project_name, a.deadline,
-  a.estimate_minutes, a.dependency_ids, a.success_criteria, a.evidence_requirement, a.status, a.created_at, a.updated_at,
-  json_extract(p.plan_json, '$.title') AS goal_title
+  a.estimate_minutes, a.dependency_ids, a.success_criteria, a.evidence_requirement, a.status,
+  a.priority, a.milestone_id, a.created_at, a.updated_at,
+  p.plan_json, json_extract(p.plan_json, '$.title') AS goal_title
   FROM goal_plan_actions a JOIN goal_plans p ON p.id=a.goal_plan_id`;
 
 export function listGoalPlanActions(goalPlanId?: string): GoalPlanAction[] {
@@ -677,9 +740,16 @@ export function activateGoalPlan(id: string): GoalPlan {
     database.prepare("UPDATE goal_plans SET status='active', updated_at=?, activated_at=?, lifecycle_reason=NULL WHERE id=?")
       .run(activatedAt, activatedAt, id);
     appendEvent(database, id, 'draft', 'active', 'activated', null, null, activatedAt);
-    const insertAction = database.prepare("INSERT INTO goal_plan_actions (id, goal_plan_id, title, details, estimate_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending_schedule', ?, ?)");
-    for (const action of plan.nextActions.filter(item => item.title && item.specificity === 'concrete')) {
-      insertAction.run(randomUUID(), id, action.title, action.details, action.estimateMinutes, activatedAt, activatedAt);
+    const concreteActions = plan.nextActions.filter(item => item.title && item.specificity === 'concrete');
+    const taskIds = new Map(concreteActions.map(action => [action.id, `${id}:${action.id}`]));
+    const insertAction = database.prepare(`INSERT INTO goal_plan_actions
+      (id, goal_plan_id, title, details, project_name, deadline, estimate_minutes, dependency_ids,
+        success_criteria, evidence_requirement, status, priority, milestone_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, 'pending_schedule', ?, ?, ?, ?)`);
+    for (const action of concreteActions) {
+      const dependencies = action.dependsOn.map(dependency => taskIds.get(dependency)!);
+      insertAction.run(taskIds.get(action.id)!, id, action.title, action.details, action.hardDeadline, action.estimateMinutes,
+        JSON.stringify(dependencies), action.priority, action.milestoneId, activatedAt, activatedAt);
     }
     database.exec('COMMIT');
     inTransaction = false;

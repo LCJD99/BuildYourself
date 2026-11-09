@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, PendingGoalAction } from '@/lib/goal-plans';
 import type { TaskChangeEvent } from '@/lib/milestone-store';
 
@@ -48,7 +48,7 @@ function formatTaskChangeValue(value: unknown, actions: GoalPlanAction[]) {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
-export default function GoalPlansPanel() {
+export default function GoalPlansPanel({ focusActionId }: { focusActionId?: string | null }) {
   const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [], actions: [], taskChanges: [] });
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -58,6 +58,7 @@ export default function GoalPlansPanel() {
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [taskDraft, setTaskDraft] = useState<TaskDraft | null>(null);
   const [savingTask, setSavingTask] = useState(false);
+  const lastScrolledFocus = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -75,6 +76,16 @@ export default function GoalPlansPanel() {
     const timer = window.setInterval(refresh, 3000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!focusActionId || lastScrolledFocus.current === focusActionId) return;
+    const target = document.getElementById(`goal-action-${focusActionId}`)
+      ?? document.getElementById(`goal-plan-${focusActionId.split(':', 1)[0]}`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      lastScrolledFocus.current = focusActionId;
+    }
+  }, [focusActionId, state.plans, state.pendingActions, state.actions]);
 
   async function postLifecycle(plan: GoalPlan, action: LifecycleAction, extra: Record<string, unknown> = {}) {
     let reason: string | null = null;
@@ -358,7 +369,7 @@ export default function GoalPlansPanel() {
         const taskChanges = state.taskChanges.filter(change => change.details.goalPlanId === plan.id).slice(0, 5);
         const editingHere = taskGoalPlanId === plan.id && taskDraft !== null;
         return (
-          <article className="goal-card active-goal" key={plan.id}>
+          <article className="goal-card active-goal" id={`goal-plan-${plan.id}`} key={plan.id}>
             <div className="goal-card-head">
               <div><span className="goal-state active-state">活跃 · {plan.domain === 'learning' ? '学习目标' : plan.domain === 'fitness' ? '健身目标' : plan.domain === 'project' ? '项目目标' : '通用目标'}</span><h3>{plan.title}</h3></div>
               <span className="goal-review">每 {plan.reviewCycleDays} 天复盘</span>
@@ -399,7 +410,7 @@ export default function GoalPlansPanel() {
                 <button type="button" className="secondary-button" onClick={() => beginTaskCreate(plan.id)}>新增任务</button>
               </div>
               {actions.length ? <div className="goal-task-list">{actions.map(action => (
-                <article className="goal-task-card" key={action.id}>
+                <article className="goal-task-card" id={`goal-action-${action.id}`} key={action.id}>
                   <div className="goal-task-card-head">
                     <div><span className={`goal-task-status ${action.status}`}>{action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
                     <button type="button" className="edit-evidence-button" onClick={() => beginTaskEdit(action)}>编辑</button>

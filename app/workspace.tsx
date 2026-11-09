@@ -14,6 +14,9 @@ import {
   type TaskExecution,
 } from '@/lib/model';
 import GoalPlansPanel from './goal-plans-panel';
+import DailyPlanPanel from './daily-plan-panel';
+import type { DailyPlanRecord } from '@/lib/daily-plan-store';
+import type { WeeklyPlan } from '@/lib/daily-planner';
 
 type Graph = {
   evidence: Evidence[];
@@ -83,6 +86,9 @@ export default function Workspace() {
   const [celebrating, setCelebrating] = useState(false);
   const [editingEvidence, setEditingEvidence] = useState<string | null>(null);
   const [evidenceDraft, setEvidenceDraft] = useState<Evidence | null>(null);
+  const [dailyPlanRecord, setDailyPlanRecord] = useState<DailyPlanRecord>({ plan: null, status: null, confirmedAt: null, updatedAt: null });
+  const [focusedAction, setFocusedAction] = useState<WeeklyPlan['days'][number]['actions'][number] | null>(null);
+  const [selectedGoalPlanId, setSelectedGoalPlanId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -102,7 +108,7 @@ export default function Workspace() {
     return () => clearInterval(timer);
   }, [refresh]);
 
-  async function select(id: NodeId) {
+  const select = useCallback(async (id: NodeId) => {
     setSelected(id);
     try {
       const response = await fetch('/api/context', {
@@ -114,7 +120,15 @@ export default function Workspace() {
     } catch {
       setError('当前对象未能同步到 pi，请重试。');
     }
-  }
+  }, []);
+
+  const focusDailyAction = useCallback((action: WeeklyPlan['days'][number]['actions'][number]) => {
+    setFocusedAction(action);
+    setSelectedGoalPlanId(action.goalPlanId);
+    void select('task');
+  }, [select]);
+
+  const updateDailyPlan = useCallback((record: DailyPlanRecord) => setDailyPlanRecord(record), []);
 
   async function saveExecution(completed: boolean) {
     setSaving(true);
@@ -221,6 +235,7 @@ export default function Workspace() {
   const results = graph?.results ?? [];
   const visible = graph?.evidence.filter(evidence => selected === 'goal' || evidence.links.includes(selected)) ?? [];
   const assessment = selected === 'task' || selected === 'milestone' ? graph?.assessments[selected] : null;
+  const scheduledGoals = Array.from(new Map((dailyPlanRecord.plan?.days.flatMap(day => day.actions) ?? []).map(action => [action.goalPlanId, action])).values());
 
   return (
     <main className="shell">
@@ -230,16 +245,24 @@ export default function Workspace() {
           <div><strong>BuildYourself</strong><small>个人执行空间</small></div>
         </div>
         <div className="nav-label">工作空间 <span>01</span></div>
-        <button className="nav-home" onClick={() => void select('goal')}>◈ <span>目标全景</span></button>
+        <button className="nav-home" onClick={() => { setFocusedAction(null); setSelectedGoalPlanId(null); void select('goal'); }}>◈ <span>目标全景</span></button>
         <div className="tree-label">我的目标 <span>⌄</span></div>
         <div className="tree">
           {nodes.map((node, index) => (
-            <button key={node.id} className={`${selected === node.id ? 'active ' : ''}${index ? 'child' : ''}`} onClick={() => void select(node.id)}>
+            <button key={node.id} className={`${selected === node.id ? 'active ' : ''}${index ? 'child' : ''}`} onClick={() => { setFocusedAction(null); setSelectedGoalPlanId(null); void select(node.id); }}>
               <span className="node-icon">{index === 0 ? '◉' : index === 1 ? '□' : '◇'}</span>
               <span>{node.title}</span>
             </button>
           ))}
         </div>
+        {scheduledGoals.length > 0 && <>
+          <div className="tree-label daily-plan-tree-label">本周行动归属</div>
+          <div className="tree">{scheduledGoals.map(action => (
+            <button key={action.goalPlanId} className={`${selectedGoalPlanId === action.goalPlanId ? 'active ' : ''}child`} onClick={() => focusDailyAction(action)}>
+              <span className="node-icon">◉</span><span>{action.goalTitle}</span>
+            </button>
+          ))}</div>
+        </>}
         <div className="sidebar-bottom"><span className="online" /> 本地个人空间 <small>数据保存在本机</small></div>
       </aside>
 
@@ -253,7 +276,8 @@ export default function Workspace() {
             <span>◉ &nbsp; 活跃中</span><span>◇ &nbsp; 1 个里程碑</span><span>◷ &nbsp; {graph?.evidence.length ?? 0} 条证据</span>
           </div>
 
-          <GoalPlansPanel />
+          <DailyPlanPanel onActionClick={focusDailyAction} onPlanChange={updateDailyPlan} />
+          <GoalPlansPanel focusActionId={focusedAction?.actionId} />
 
           {selected === 'task' && (
             <section className="execution-panel" aria-labelledby="execution-title">
@@ -356,9 +380,20 @@ export default function Workspace() {
           <div className="detail-overline">CURRENT VIEW</div>
           <h2>{current.title}</h2>
           <p className="detail-intro">执行记录、证据充足度和结果判定分别展示。</p>
+          {focusedAction && <section className="focused-action-context" aria-labelledby="focused-action-title">
+            <span className="kicker">SELECTED ACTION</span>
+            <h3 id="focused-action-title">{focusedAction.title}</h3>
+            <p>归属：{focusedAction.goalTitle}</p>
+            <div className="detail-divider" />
+            <span className="kicker">关联里程碑</span>
+            {focusedAction.milestoneTitle ? <>
+              <strong>{focusedAction.milestoneTitle}</strong>
+              <p>{focusedAction.milestoneCriteria || '尚未填写验收标准。'}</p>
+            </> : <p>此行动尚未关联里程碑。</p>}
+          </section>}
           <div className="detail-divider" />
 
-          {assessment && (
+          {!focusedAction && assessment && (
             <section className="assessment-card" aria-labelledby="assessment-title">
               <div className="result-label"><span>证据要求</span><span>◈</span></div>
               <label htmlFor="minimum-evidence" id="assessment-title">最低证据等级</label>
@@ -375,7 +410,7 @@ export default function Workspace() {
             </section>
           )}
 
-          {results.map((result, index) => {
+          {!focusedAction && results.map((result, index) => {
             const isMilestone = index === 1;
             return (
               <article className={`result${isMilestone && celebrating ? ' celebrating' : ''}`} key={result.title}>
@@ -399,7 +434,7 @@ export default function Workspace() {
               </article>
             );
           })}
-          <section className="change-log" aria-labelledby="change-log-title">
+          {!focusedAction && <section className="change-log" aria-labelledby="change-log-title">
             <div className="result-label"><h3 id="change-log-title">变更记录</h3><span>{graph?.changes.length ?? 0}</span></div>
             {graph?.changes.length ? (
               <ul>{graph.changes.map(change => <li key={change.id}>
@@ -415,8 +450,8 @@ export default function Workspace() {
                 <time>{date(change.createdAt)}</time>
               </li>)}</ul>
             ) : <p>尚无目标、任务或证据变更记录。</p>}
-          </section>
-          <div className="hint"><span>✳</span><p><strong>执行完成与目标进展分开判断</strong><br />保存行动完成不会自动提高能力或里程碑判定。</p></div>
+          </section>}
+          {!focusedAction && <div className="hint"><span>✳</span><p><strong>执行完成与目标进展分开判断</strong><br />保存行动完成不会自动提高能力或里程碑判定。</p></div>}
         </div>
       </aside>
     </main>

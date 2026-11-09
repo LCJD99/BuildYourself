@@ -28,6 +28,10 @@ const planSchema = Type.Object({
     title: optionalText(),
     details: optionalText(),
     estimateMinutes: Type.Optional(Type.Union([Type.Integer({ minimum: 1, maximum: 10080 }), Type.Null()])),
+    priority: Type.Optional(oneOf(['high', 'medium', 'low'])),
+    hardDeadline: Type.Optional(Type.Union([Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }), Type.Null()])),
+    milestoneId: optionalText(),
+    dependsOn: Type.Optional(Type.Array(Type.String())),
     specificity: Type.Optional(oneOf(['concrete', 'draft'])),
   }))),
   constraints: Type.Optional(Type.Object({
@@ -56,8 +60,8 @@ function result(message, isError = false) {
 
 function describePlan(plan) {
   const blockers = plan.validation.issues.length ? `\n待补充：${plan.validation.issues.join('；')}` : '\n契约校验通过，可以请求用户核对。';
-  const milestones = plan.milestones.map(item => `- ${item.stage === 'near' ? '近期' : '远期'}：${item.title || '未命名'}；标准：${item.successCriteria || '待细化'}；评估：${item.standardAssessment}；证据可获得性：${item.evidenceAvailability}；说明：${item.reviewNote || '待补充'}；证据要求：${item.evidenceRequirement || '待补充'}`).join('\n') || '待补充';
-  const actions = plan.nextActions.map(item => `- ${item.title || '待补充'}${item.details ? `：${item.details}` : ''}${item.estimateMinutes ? `（约 ${item.estimateMinutes} 分钟）` : ''} · ${item.specificity === 'concrete' ? '具体行动' : '待细化'}`).join('\n') || '待补充';
+  const milestones = plan.milestones.map(item => `- ID ${item.id} · ${item.stage === 'near' ? '近期' : '远期'}：${item.title || '未命名'}；标准：${item.successCriteria || '待细化'}；评估：${item.standardAssessment}；证据可获得性：${item.evidenceAvailability}；说明：${item.reviewNote || '待补充'}；证据要求：${item.evidenceRequirement || '待补充'}`).join('\n') || '待补充';
+  const actions = plan.nextActions.map(item => `- ID ${item.id} · ${item.title || '待补充'}${item.details ? `：${item.details}` : ''}${item.estimateMinutes ? `（约 ${item.estimateMinutes} 分钟）` : ''} · 优先级 ${item.priority || 'medium'} · 硬截止 ${item.hardDeadline || '无'} · 里程碑 ${item.milestoneId || '待关联'} · 依赖 ${item.dependsOn?.join(', ') || '无'} · ${item.specificity === 'concrete' ? '具体行动' : '待细化'}`).join('\n') || '待补充';
   const evidence = plan.evidenceRequirements.map(item => `- ${item.item || '待补充'}：${item.description || '待补充'}（最低 ${item.minimumLevel || '待设置'}）`).join('\n') || '待补充';
   const constraints = plan.constraints.status === 'confirmed' ? (plan.constraints.items.join('；') || '已确认无额外限制') : '待确认';
   const status = {
@@ -93,6 +97,7 @@ export default function (pi) {
       'Use goal_planning to list plans, save or edit a draft, and activate a validated draft only after the user explicitly confirms it.',
       'When saving an edit, include the changed fields and preserve all other known contract details; drafts stay outside automatic planning until activation.',
       'Before activation, show the title, success description, observable result, milestones, evidence requirements, constraints, review cycle, and near-term actions to the user.',
+      'For each concrete action, include an estimate when supported, priority (high/medium/low), an explicit hard deadline only when stated, dependencies on action IDs when applicable, and a related near milestone ID when clear. Reuse IDs from this draft and never invent deadlines or dependencies.',
     ],
     parameters: Type.Object({
       action: oneOf(['list', 'save_draft', 'activate']),
