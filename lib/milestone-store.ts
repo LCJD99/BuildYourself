@@ -220,7 +220,7 @@ export function correctEvidence(id: unknown, input: unknown): EvidenceCorrection
 export function listChangeEvents(): ChangeEvent[] {
   const database = db();
   try {
-    const rows = database.prepare('SELECT * FROM change_events ORDER BY created_at DESC').all() as Record<string, unknown>[];
+    const rows = database.prepare('SELECT * FROM change_events ORDER BY created_at DESC, rowid DESC').all() as Record<string, unknown>[];
     return rows.map(row => {
       let details: { resultChanges?: ResultChange[]; confirmationInvalidated?: boolean } = {};
       try {
