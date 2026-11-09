@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from './store';
+import { recordTaskChange } from './milestone-store';
 
 export type GoalDomain = 'learning' | 'fitness' | 'project' | 'general';
 export type GoalPlanStatus = 'draft' | 'active' | 'paused' | 'completed' | 'archived' | 'abandoned';
@@ -72,15 +74,33 @@ export type GoalPlan = GoalPlanDraft & {
   validation: GoalPlanValidation;
 };
 
-export type PendingGoalAction = {
+export type GoalPlanAction = {
   id: string;
   goalPlanId: string;
   goalTitle: string;
+  projectName: string | null;
   title: string;
   details: string | null;
+  deadline: string | null;
   estimateMinutes: number | null;
-  status: 'pending_schedule';
+  dependencyIds: string[];
+  successCriteria: string | null;
+  evidenceRequirement: string | null;
+  status: 'pending_schedule' | 'scheduled' | 'done';
   createdAt: string;
+  updatedAt: string;
+};
+export type PendingGoalAction = GoalPlanAction & { status: 'pending_schedule' };
+
+export type GoalPlanActionInput = {
+  title: string;
+  projectName: string | null;
+  details: string | null;
+  deadline: string | null;
+  estimateMinutes: number | null;
+  dependencyIds: string[];
+  successCriteria: string | null;
+  evidenceRequirement: string | null;
 };
 
 const domains = new Set<GoalDomain>(['learning', 'fitness', 'project', 'general']);
@@ -295,6 +315,17 @@ function ensureSchema() {
       VALUES (?, ?, NULL, ?, 'imported', '生命周期记录迁移时已有的状态', NULL, ?)`);
     for (const plan of legacyPlans) insertEvent.run(randomUUID(), plan.id, plan.status, plan.updated_at);
   }
+  const actionColumns = database.prepare('PRAGMA table_info(goal_plan_actions)').all() as { name: string }[];
+  const existingColumns = new Set(actionColumns.map(column => column.name));
+  if (!existingColumns.has('project_name')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN project_name TEXT');
+  if (!existingColumns.has('deadline')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN deadline TEXT');
+  if (!existingColumns.has('dependency_ids')) database.exec("ALTER TABLE goal_plan_actions ADD COLUMN dependency_ids TEXT NOT NULL DEFAULT '[]'");
+  if (!existingColumns.has('success_criteria')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN success_criteria TEXT');
+  if (!existingColumns.has('evidence_requirement')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN evidence_requirement TEXT');
+  if (!existingColumns.has('updated_at')) {
+    database.exec('ALTER TABLE goal_plan_actions ADD COLUMN updated_at TEXT');
+    database.exec('UPDATE goal_plan_actions SET updated_at=created_at WHERE updated_at IS NULL');
+  }
   return database;
 }
 
@@ -405,28 +436,221 @@ export function listGoalPlans(): GoalPlan[] {
   }
 }
 
-export function listPendingGoalActions(): PendingGoalAction[] {
+function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
+  let dependencyIds: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(String(row.dependency_ids ?? '[]'));
+    if (Array.isArray(parsed)) dependencyIds = parsed.filter((id): id is string => typeof id === 'string');
+  } catch {
+    dependencyIds = [];
+  }
+  return {
+    id: String(row.id),
+    goalPlanId: String(row.goal_plan_id),
+    goalTitle: String(row.goal_title),
+    projectName: row.project_name === null ? null : String(row.project_name),
+    title: String(row.title),
+    details: row.details === null ? null : String(row.details),
+    deadline: row.deadline === null ? null : String(row.deadline),
+    estimateMinutes: row.estimate_minutes === null ? null : Number(row.estimate_minutes),
+    dependencyIds,
+    successCriteria: row.success_criteria === null ? null : String(row.success_criteria),
+    evidenceRequirement: row.evidence_requirement === null ? null : String(row.evidence_requirement),
+    status: row.status === 'scheduled' || row.status === 'done' ? row.status : 'pending_schedule',
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at ?? row.created_at),
+  };
+}
+
+const actionSelect = `SELECT a.id, a.goal_plan_id, a.title, a.details, a.project_name, a.deadline,
+  a.estimate_minutes, a.dependency_ids, a.success_criteria, a.evidence_requirement, a.status, a.created_at, a.updated_at,
+  json_extract(p.plan_json, '$.title') AS goal_title
+  FROM goal_plan_actions a JOIN goal_plans p ON p.id=a.goal_plan_id`;
+
+export function listGoalPlanActions(goalPlanId?: string): GoalPlanAction[] {
   const database = ensureSchema();
   try {
-    const rows = database.prepare(`SELECT a.id, a.goal_plan_id, p.plan_json, a.title, a.details, a.estimate_minutes, a.status, a.created_at
-      FROM goal_plan_actions a JOIN goal_plans p ON p.id=a.goal_plan_id
-      WHERE a.status='pending_schedule' AND p.status='active' ORDER BY a.created_at, a.id`).all() as Array<Record<string, unknown>>;
-    return rows.map(row => {
-      const plan = JSON.parse(String(row.plan_json)) as GoalPlanDraft;
-      return {
-        id: String(row.id),
-        goalPlanId: String(row.goal_plan_id),
-        goalTitle: plan.title ?? '未命名目标',
-        title: String(row.title),
-        details: row.details === null ? null : String(row.details),
-        estimateMinutes: row.estimate_minutes === null ? null : Number(row.estimate_minutes),
-        status: 'pending_schedule',
-        createdAt: String(row.created_at),
-      };
-    });
+    const rows = goalPlanId
+      ? database.prepare(`${actionSelect} WHERE p.status='active' AND p.id=? ORDER BY a.created_at, a.id`).all(goalPlanId)
+      : database.prepare(`${actionSelect} WHERE p.status='active' ORDER BY a.created_at, a.id`).all();
+    return (rows as Array<Record<string, unknown>>).map(actionFromRow);
   } finally {
     database.close();
   }
+}
+
+export function listPendingGoalActions(): PendingGoalAction[] {
+  return listGoalPlanActions().filter((action): action is PendingGoalAction => action.status === 'pending_schedule');
+}
+
+function normalizeActionDeadline(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('截止日期格式无效');
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw new Error('截止日期无效');
+  return value;
+}
+
+function normalizeGoalPlanActionInput(input: unknown, existing?: GoalPlanAction): GoalPlanActionInput {
+  const value = object(input, '任务');
+  const title = nullableText(value.title === undefined ? existing?.title : value.title, '任务名称', 240);
+  if (!title) throw new Error('请填写任务名称');
+  const rawEstimate = value.estimateMinutes === undefined ? existing?.estimateMinutes ?? null : value.estimateMinutes;
+  if (rawEstimate !== null && (typeof rawEstimate !== 'number' || !Number.isInteger(rawEstimate) || rawEstimate < 1 || rawEstimate > 10080)) {
+    throw new Error('预计耗时必须是 1 到 10080 分钟的整数');
+  }
+  const rawDependencies = value.dependencyIds === undefined ? existing?.dependencyIds ?? [] : value.dependencyIds;
+  if (!Array.isArray(rawDependencies) || !rawDependencies.every(id => typeof id === 'string' && id.length > 0)
+      || new Set(rawDependencies).size !== rawDependencies.length) {
+    throw new Error('任务依赖格式无效');
+  }
+  return {
+    title,
+    projectName: nullableText(value.projectName === undefined ? existing?.projectName : value.projectName, '项目名称', 240),
+    details: nullableText(value.details === undefined ? existing?.details : value.details, '任务说明'),
+    deadline: normalizeActionDeadline(value.deadline === undefined ? existing?.deadline : value.deadline),
+    estimateMinutes: rawEstimate,
+    dependencyIds: [...rawDependencies].sort() as string[],
+    successCriteria: nullableText(value.successCriteria === undefined ? existing?.successCriteria : value.successCriteria, '完成标准'),
+    evidenceRequirement: nullableText(value.evidenceRequirement === undefined ? existing?.evidenceRequirement : value.evidenceRequirement, '证据要求'),
+  };
+}
+
+function ensureActiveGoalPlan(database: DatabaseSync, goalPlanId: unknown): { id: string } {
+  if (typeof goalPlanId !== 'string' || !goalPlanId) throw new Error('任务必须归属一个活跃目标');
+  const row = database.prepare("SELECT id FROM goal_plans WHERE id=? AND status='active'")
+    .get(goalPlanId) as { id: string } | undefined;
+  if (!row) throw new Error('任务必须归属一个活跃目标');
+  return { id: row.id };
+}
+
+function validateActionDependencies(database: DatabaseSync, goalPlanId: string, taskId: string, dependencyIds: string[]) {
+  const rows = database.prepare('SELECT id, dependency_ids FROM goal_plan_actions WHERE goal_plan_id=?').all(goalPlanId) as Array<{ id: string; dependency_ids: string }>;
+  const graph = new Map(rows.map(row => {
+    let dependencies: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.dependency_ids);
+      if (Array.isArray(parsed)) dependencies = parsed.filter((id): id is string => typeof id === 'string');
+    } catch {
+      dependencies = [];
+    }
+    return [row.id, dependencies] as const;
+  }));
+  const validTaskIds = new Set(graph.keys());
+  if (dependencyIds.some(id => id === taskId || !validTaskIds.has(id))) {
+    throw new Error('依赖必须指向同一活跃目标下的其他任务');
+  }
+  graph.set(taskId, dependencyIds);
+  const visited = new Set<string>();
+  const activePath = new Set<string>();
+  const hasCycle = (id: string): boolean => {
+    if (activePath.has(id)) return true;
+    if (visited.has(id)) return false;
+    activePath.add(id);
+    for (const dependencyId of graph.get(id) ?? []) if (hasCycle(dependencyId)) return true;
+    activePath.delete(id);
+    visited.add(id);
+    return false;
+  };
+  if ([...graph.keys()].some(hasCycle)) throw new Error('任务依赖不能形成循环');
+}
+
+const actionFieldLabels: Array<[keyof GoalPlanActionInput, string]> = [
+  ['projectName', '所属项目'],
+  ['title', '任务名称'],
+  ['details', '任务说明'],
+  ['deadline', '截止日期'],
+  ['estimateMinutes', '预计耗时'],
+  ['dependencyIds', '依赖'],
+  ['successCriteria', '完成标准'],
+  ['evidenceRequirement', '证据要求'],
+];
+
+function actionFieldChanges(previous: GoalPlanActionInput | null, next: GoalPlanActionInput) {
+  return actionFieldLabels.flatMap(([field, label]) => {
+    const before = previous?.[field] ?? null;
+    const after = next[field];
+    if (!previous) {
+      const hasValue = Array.isArray(after) ? after.length > 0 : after !== null && after !== '';
+      return hasValue ? [{ field: label, before: null, after }] : [];
+    }
+    return JSON.stringify(before) === JSON.stringify(after) ? [] : [{ field: label, before, after }];
+  });
+}
+
+export function createGoalPlanAction(input: unknown): GoalPlanAction {
+  const value = object(input, '任务');
+  const goalPlanId = typeof value.goalPlanId === 'string' ? value.goalPlanId : '';
+  const action = normalizeGoalPlanActionInput(value);
+  const database = ensureSchema();
+  let inTransaction = false;
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const goalPlan = ensureActiveGoalPlan(database, goalPlanId);
+    validateActionDependencies(database, goalPlan.id, id, action.dependencyIds);
+    database.prepare(`INSERT INTO goal_plan_actions
+      (id,goal_plan_id,title,details,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?)`)
+      .run(id, goalPlan.id, action.title, action.details, action.projectName, action.deadline, action.estimateMinutes,
+        JSON.stringify(action.dependencyIds), action.successCriteria, action.evidenceRequirement, now, now);
+    const fieldChanges = actionFieldChanges(null, action);
+    recordTaskChange(database, 'task.created', { id, goalPlanId: goalPlan.id, title: action.title, projectName: action.projectName }, fieldChanges.map(change => change.field), now, fieldChanges);
+    database.exec('COMMIT');
+    inTransaction = false;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+  return listGoalPlanActions(goalPlanId).find(action => action.id === id)!;
+}
+
+export function updateGoalPlanAction(id: string, input: unknown): GoalPlanAction {
+  const value = object(input, '任务');
+  const database = ensureSchema();
+  let inTransaction = false;
+  let goalPlanId = '';
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const row = database.prepare(`${actionSelect} WHERE a.id=? AND p.status='active'`).get(id) as Record<string, unknown> | undefined;
+    if (!row) throw new Error('任务不存在或不属于活跃目标');
+    const previous = actionFromRow(row);
+    goalPlanId = previous.goalPlanId;
+    if (value.goalPlanId !== undefined && value.goalPlanId !== previous.goalPlanId) throw new Error('任务归属不能更换');
+    const next = normalizeGoalPlanActionInput(value, previous);
+    validateActionDependencies(database, goalPlanId, id, next.dependencyIds);
+    const previousFields: GoalPlanActionInput = {
+      title: previous.title,
+      projectName: previous.projectName,
+      details: previous.details,
+      deadline: previous.deadline,
+      estimateMinutes: previous.estimateMinutes,
+      dependencyIds: previous.dependencyIds,
+      successCriteria: previous.successCriteria,
+      evidenceRequirement: previous.evidenceRequirement,
+    };
+    const fieldChanges = actionFieldChanges(previousFields, next);
+    if (fieldChanges.length) {
+      const updatedAt = new Date().toISOString();
+      database.prepare(`UPDATE goal_plan_actions SET title=?,details=?,project_name=?,deadline=?,estimate_minutes=?,dependency_ids=?,success_criteria=?,evidence_requirement=?,updated_at=? WHERE id=?`)
+        .run(next.title, next.details, next.projectName, next.deadline, next.estimateMinutes, JSON.stringify(next.dependencyIds),
+          next.successCriteria, next.evidenceRequirement, updatedAt, id);
+      recordTaskChange(database, 'task.updated', { id, goalPlanId, title: next.title, projectName: next.projectName }, fieldChanges.map(change => change.field), updatedAt, fieldChanges);
+    }
+    database.exec('COMMIT');
+    inTransaction = false;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+  return listGoalPlanActions(goalPlanId).find(action => action.id === id)!;
 }
 
 export function activateGoalPlan(id: string): GoalPlan {
@@ -453,9 +677,9 @@ export function activateGoalPlan(id: string): GoalPlan {
     database.prepare("UPDATE goal_plans SET status='active', updated_at=?, activated_at=?, lifecycle_reason=NULL WHERE id=?")
       .run(activatedAt, activatedAt, id);
     appendEvent(database, id, 'draft', 'active', 'activated', null, null, activatedAt);
-    const insertAction = database.prepare("INSERT INTO goal_plan_actions (id, goal_plan_id, title, details, estimate_minutes, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending_schedule', ?)");
+    const insertAction = database.prepare("INSERT INTO goal_plan_actions (id, goal_plan_id, title, details, estimate_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending_schedule', ?, ?)");
     for (const action of plan.nextActions.filter(item => item.title && item.specificity === 'concrete')) {
-      insertAction.run(randomUUID(), id, action.title, action.details, action.estimateMinutes, activatedAt);
+      insertAction.run(randomUUID(), id, action.title, action.details, action.estimateMinutes, activatedAt, activatedAt);
     }
     database.exec('COMMIT');
     inTransaction = false;

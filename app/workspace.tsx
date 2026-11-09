@@ -30,7 +30,7 @@ type Graph = {
   taskExecution: TaskExecution;
   changes: Array<{
     id: string;
-    eventType: 'milestone.confirmed' | 'evidence.corrected';
+    eventType: 'milestone.confirmed' | 'evidence.corrected' | 'task.created' | 'task.updated';
     entityId: string;
     summary: string;
     createdAt: string;
@@ -414,7 +414,7 @@ export default function Workspace() {
                 {change.confirmationInvalidated && <span className="confirmation-reset">原里程碑确认已撤销，请重新核对并确认。</span>}
                 <time>{date(change.createdAt)}</time>
               </li>)}</ul>
-            ) : <p>尚无证据更正或里程碑确认记录。</p>}
+            ) : <p>尚无目标、任务或证据变更记录。</p>}
           </section>
           <div className="hint"><span>✳</span><p><strong>执行完成与目标进展分开判断</strong><br />保存行动完成不会自动提高能力或里程碑判定。</p></div>
         </div>

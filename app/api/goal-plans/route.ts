@@ -1,9 +1,16 @@
-import { listGoalPlans, listPendingGoalActions, saveGoalPlanDraft } from '@/lib/goal-plans';
+import { listGoalPlans, listGoalPlanActions, listPendingGoalActions, saveGoalPlanDraft } from '@/lib/goal-plans';
+import { listChangeEvents } from '@/lib/milestone-store';
 
 export const dynamic = 'force-dynamic';
 
 export function GET() {
-  return Response.json({ plans: listGoalPlans(), pendingActions: listPendingGoalActions() });
+  const changes = listChangeEvents().filter(event => event.eventType === 'task.created' || event.eventType === 'task.updated');
+  return Response.json({
+    plans: listGoalPlans(),
+    pendingActions: listPendingGoalActions(),
+    actions: listGoalPlanActions(),
+    taskChanges: changes,
+  });
 }
 
 export async function POST(request: Request) {

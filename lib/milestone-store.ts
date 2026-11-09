@@ -17,26 +17,31 @@ export type ResultChange = {
 
 export type ChangeEvent = {
   id: string;
-  eventType: 'milestone.confirmed' | 'evidence.corrected';
+  eventType: 'milestone.confirmed' | 'evidence.corrected' | 'task.created' | 'task.updated';
   entityId: string;
   summary: string;
   createdAt: string;
   evidenceIds: string[];
   resultChanges: ResultChange[];
   confirmationInvalidated: boolean;
+  details: Record<string, unknown>;
 };
 export type MilestoneChangeEvent = ChangeEvent & { eventType: 'milestone.confirmed'; entityId: 'milestone' };
+export type TaskChangeEvent = ChangeEvent & {
+  eventType: 'task.created' | 'task.updated';
+  details: {
+    goalPlanId: string;
+    taskTitle: string;
+    projectName: string | null;
+    changedFields: string[];
+    fieldChanges?: Array<{ field: string; before: unknown; after: unknown }>;
+  };
+};
 type EvidenceOutcome = Pick<Result, 'title' | 'status' | 'gap' | 'detail'> & { nodeId: EvidenceNodeId };
 export type EvidenceCorrection = { evidence: Evidence; changed: boolean; resultChanges: ResultChange[]; confirmationInvalidated: boolean };
 
-function db() {
-  const database = openDatabase();
-  database.exec(`CREATE TABLE IF NOT EXISTS milestone_confirmations (
-      node_id TEXT PRIMARY KEY,
-      confirmed_at TEXT NOT NULL,
-      evidence_ids TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS change_events (
+function ensureChangeEventSchema(database: DatabaseSync) {
+  database.exec(`CREATE TABLE IF NOT EXISTS change_events (
       id TEXT PRIMARY KEY,
       event_type TEXT NOT NULL,
       entity_id TEXT NOT NULL,
@@ -46,7 +51,41 @@ function db() {
     );`);
   const eventColumns = database.prepare('PRAGMA table_info(change_events)').all() as { name: string }[];
   if (!eventColumns.some(column => column.name === 'details')) database.exec("ALTER TABLE change_events ADD COLUMN details TEXT NOT NULL DEFAULT '{}'");
+}
+
+function db() {
+  const database = openDatabase();
+  database.exec(`CREATE TABLE IF NOT EXISTS milestone_confirmations (
+      node_id TEXT PRIMARY KEY,
+      confirmed_at TEXT NOT NULL,
+      evidence_ids TEXT NOT NULL
+    );`);
+  ensureChangeEventSchema(database);
   return database;
+}
+
+export function recordTaskChange(
+  database: DatabaseSync,
+  eventType: TaskChangeEvent['eventType'],
+  task: { id: string; goalPlanId: string; title: string; projectName: string | null },
+  changedFields: string[],
+  createdAt: string,
+  fieldChanges: Array<{ field: string; before: unknown; after: unknown }>,
+) {
+  ensureChangeEventSchema(database);
+  const verb = eventType === 'task.created' ? '新增' : '修改';
+  const fieldSummary = changedFields.length ? `：${changedFields.join('、')}` : '';
+  const summary = `${verb}任务「${task.title}」${fieldSummary}`;
+  const details = JSON.stringify({
+    goalPlanId: task.goalPlanId,
+    taskTitle: task.title,
+    projectName: task.projectName,
+    changedFields,
+    fieldChanges,
+  });
+  database.prepare(`INSERT INTO change_events(id,event_type,entity_id,summary,created_at,evidence_ids,details)
+    VALUES (?,?,?,?,?,'[]',?)`)
+    .run(randomUUID(), eventType, task.id, summary, createdAt, details);
 }
 
 function readConfirmation(database: DatabaseSync): MilestoneConfirmation | null {
@@ -223,20 +262,27 @@ export function listChangeEvents(): ChangeEvent[] {
     const rows = database.prepare('SELECT * FROM change_events ORDER BY created_at DESC, rowid DESC').all() as Record<string, unknown>[];
     return rows.map(row => {
       let details: { resultChanges?: ResultChange[]; confirmationInvalidated?: boolean } = {};
+      let fullDetails: Record<string, unknown> = {};
       try {
-        details = JSON.parse(String(row.details ?? '{}')) as typeof details;
+        fullDetails = JSON.parse(String(row.details ?? '{}')) as Record<string, unknown>;
+        details = fullDetails as typeof details;
       } catch {
         details = {};
+        fullDetails = {};
       }
+      const eventType = row.event_type === 'evidence.corrected' || row.event_type === 'task.created' || row.event_type === 'task.updated'
+        ? row.event_type
+        : 'milestone.confirmed';
       return {
       id: String(row.id),
-      eventType: row.event_type === 'evidence.corrected' ? 'evidence.corrected' : 'milestone.confirmed',
+      eventType,
       entityId: String(row.entity_id),
       summary: String(row.summary),
       createdAt: String(row.created_at),
       evidenceIds: JSON.parse(String(row.evidence_ids)) as string[],
       resultChanges: details.resultChanges ?? [],
       confirmationInvalidated: details.confirmationInvalidated ?? false,
+      details: fullDetails,
     };
     });
   } finally {

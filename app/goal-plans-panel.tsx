@@ -1,10 +1,21 @@
 'use client';
 
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import type { CompletionEvidence, GoalPlan, GoalPlanEventAction, GoalPlanStatus, PendingGoalAction } from '@/lib/goal-plans';
+import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, PendingGoalAction } from '@/lib/goal-plans';
+import type { TaskChangeEvent } from '@/lib/milestone-store';
 
-type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[] };
+type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[] };
 type LifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
+type TaskDraft = {
+  title: string;
+  projectName: string;
+  details: string;
+  deadline: string;
+  estimateMinutes: string;
+  dependencyIds: string[];
+  successCriteria: string;
+  evidenceRequirement: string;
+};
 
 const statusLabels: Record<GoalPlanStatus, string> = {
   draft: '草稿', active: '活跃', paused: '已暂停', completed: '已完成', archived: '已归档', abandoned: '已放弃',
@@ -15,12 +26,38 @@ const eventLabels: Record<GoalPlanEventAction, string> = {
   archived: '归档目标', abandoned: '放弃目标', imported: '迁移时记录已有状态',
 };
 
+function emptyTaskDraft(): TaskDraft {
+  return { title: '', projectName: '', details: '', deadline: '', estimateMinutes: '', dependencyIds: [], successCriteria: '', evidenceRequirement: '' };
+}
+
+function formatDate(value: string | null) {
+  return value ? new Date(`${value}T00:00:00`).toLocaleDateString('zh-CN') : '未设置';
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function formatTaskChangeValue(value: unknown, actions: GoalPlanAction[]) {
+  if (value === null || value === undefined || value === '') return '未设置';
+  if (Array.isArray(value)) {
+    const names = value.map(id => actions.find(action => action.id === id)?.title ?? String(id));
+    return names.length ? names.join('、') : '无';
+  }
+  if (typeof value === 'number') return `${value} 分钟`;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
 export default function GoalPlansPanel() {
-  const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [] });
+  const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [], actions: [], taskChanges: [] });
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [completionPlanId, setCompletionPlanId] = useState<string | null>(null);
   const [completionEvidence, setCompletionEvidence] = useState<CompletionEvidence[]>([]);
+  const [taskGoalPlanId, setTaskGoalPlanId] = useState<string | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [taskDraft, setTaskDraft] = useState<TaskDraft | null>(null);
+  const [savingTask, setSavingTask] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -182,6 +219,74 @@ export default function GoalPlansPanel() {
     );
   }
 
+  function beginTaskCreate(goalPlanId: string) {
+    setTaskGoalPlanId(goalPlanId);
+    setEditingTaskId(null);
+    setTaskDraft(emptyTaskDraft());
+    setError('');
+  }
+
+  function beginTaskEdit(task: GoalPlanAction) {
+    setTaskGoalPlanId(task.goalPlanId);
+    setEditingTaskId(task.id);
+    setTaskDraft({
+      title: task.title,
+      projectName: task.projectName ?? '',
+      details: task.details ?? '',
+      deadline: task.deadline ?? '',
+      estimateMinutes: task.estimateMinutes?.toString() ?? '',
+      dependencyIds: task.dependencyIds,
+      successCriteria: task.successCriteria ?? '',
+      evidenceRequirement: task.evidenceRequirement ?? '',
+    });
+    setError('');
+  }
+
+  function updateTaskDraft(update: Partial<TaskDraft>) {
+    setTaskDraft(current => current ? { ...current, ...update } : current);
+  }
+
+  function cancelTaskEdit() {
+    setTaskGoalPlanId(null);
+    setEditingTaskId(null);
+    setTaskDraft(null);
+    setError('');
+  }
+
+  async function saveTask(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!taskDraft || !taskGoalPlanId) return;
+    setSavingTask(true);
+    try {
+      const url = editingTaskId ? `/api/tasks/${encodeURIComponent(editingTaskId)}` : '/api/tasks';
+      const response = await fetch(url, {
+        method: editingTaskId ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          goalPlanId: taskGoalPlanId,
+          title: taskDraft.title,
+          projectName: taskDraft.projectName,
+          details: taskDraft.details,
+          deadline: taskDraft.deadline || null,
+          estimateMinutes: taskDraft.estimateMinutes === '' ? null : Number(taskDraft.estimateMinutes),
+          dependencyIds: taskDraft.dependencyIds,
+          successCriteria: taskDraft.successCriteria,
+          evidenceRequirement: taskDraft.evidenceRequirement,
+        }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法保存任务');
+      setTaskGoalPlanId(null);
+      setEditingTaskId(null);
+      setTaskDraft(null);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法保存任务');
+    } finally {
+      setSavingTask(false);
+    }
+  }
+
   const active = state.plans.filter(plan => plan.status === 'active');
   const paused = state.plans.filter(plan => plan.status === 'paused');
   const ended = state.plans.filter(plan => ['completed', 'archived', 'abandoned'].includes(plan.status));
@@ -249,7 +354,9 @@ export default function GoalPlansPanel() {
       ))}
 
       {active.map(plan => {
-        const actions = state.pendingActions.filter(action => action.goalPlanId === plan.id);
+        const actions = state.actions.filter(action => action.goalPlanId === plan.id);
+        const taskChanges = state.taskChanges.filter(change => change.details.goalPlanId === plan.id).slice(0, 5);
+        const editingHere = taskGoalPlanId === plan.id && taskDraft !== null;
         return (
           <article className="goal-card active-goal" key={plan.id}>
             <div className="goal-card-head">
@@ -287,8 +394,58 @@ export default function GoalPlansPanel() {
               <ul className="goal-evidence-requirements">{plan.evidenceRequirements.map(requirement => <li key={requirement.id}><strong>{requirement.minimumLevel}</strong> {requirement.item}：{requirement.description}</li>)}</ul>
             </div>
             <div className="goal-subsection">
-              <h4>近期行动 <span className="count">{actions.length} 项待排</span></h4>
-              {actions.length ? <ul className="goal-actions">{actions.map(action => <li key={action.id}><span>待排</span><div><strong>{action.title}</strong>{action.details && <small>{action.details}</small>}</div>{action.estimateMinutes && <em>{action.estimateMinutes} 分钟</em>}</li>)}</ul> : <p className="goal-empty-inline">当前没有待排行动。</p>}
+              <div className="task-section-heading">
+                <h4>任务与待排池 <span className="count">{actions.length} 项 · {actions.filter(action => action.status === 'pending_schedule').length} 项待排</span></h4>
+                <button type="button" className="secondary-button" onClick={() => beginTaskCreate(plan.id)}>新增任务</button>
+              </div>
+              {actions.length ? <div className="goal-task-list">{actions.map(action => (
+                <article className="goal-task-card" key={action.id}>
+                  <div className="goal-task-card-head">
+                    <div><span className={`goal-task-status ${action.status}`}>{action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
+                    <button type="button" className="edit-evidence-button" onClick={() => beginTaskEdit(action)}>编辑</button>
+                  </div>
+                  {action.details && <p className="goal-task-description">{action.details}</p>}
+                  <dl className="goal-task-details">
+                    <dt>归属</dt><dd>{action.projectName ? `${plan.title} · ${action.projectName}` : plan.title}</dd>
+                    <dt>截止日期</dt><dd>{formatDate(action.deadline)}</dd>
+                    <dt>预计耗时</dt><dd>{action.estimateMinutes === null ? '未设置' : `${action.estimateMinutes} 分钟`}</dd>
+                    <dt>依赖</dt><dd>{action.dependencyIds.length ? action.dependencyIds.map(id => actions.find(candidate => candidate.id === id)?.title ?? '未知任务').join('、') : '无'}</dd>
+                    <dt>完成标准</dt><dd>{action.successCriteria || '未设置'}</dd>
+                    <dt>证据要求</dt><dd>{action.evidenceRequirement || '未设置'}</dd>
+                  </dl>
+                </article>
+              ))}</div> : <p className="goal-empty-inline">当前没有任务。新增后可在待排池中查看和安排。</p>}
+
+              {editingHere && taskDraft && <form className="task-editor" onSubmit={event => void saveTask(event)}>
+                <div className="task-editor-heading"><strong>{editingTaskId ? '编辑任务' : '新增任务'}</strong><span>任务归属：{plan.title}</span></div>
+                <div className="task-editor-grid">
+                  <label>任务名称<input required maxLength={240} value={taskDraft.title} onChange={event => updateTaskDraft({ title: event.target.value })} /></label>
+                  <label>所属项目（可选）<input maxLength={240} value={taskDraft.projectName} onChange={event => updateTaskDraft({ projectName: event.target.value })} /></label>
+                  <label>截止日期<input type="date" value={taskDraft.deadline} onChange={event => updateTaskDraft({ deadline: event.target.value })} /></label>
+                  <label>预计耗时（分钟）<input type="number" min="1" max="10080" step="1" value={taskDraft.estimateMinutes} onChange={event => updateTaskDraft({ estimateMinutes: event.target.value })} /></label>
+                  <label className="task-editor-wide">任务说明<textarea rows={2} value={taskDraft.details} onChange={event => updateTaskDraft({ details: event.target.value })} /></label>
+                  <label className="task-editor-wide">完成标准<textarea rows={2} value={taskDraft.successCriteria} onChange={event => updateTaskDraft({ successCriteria: event.target.value })} /></label>
+                  <label className="task-editor-wide">证据要求<textarea rows={2} value={taskDraft.evidenceRequirement} onChange={event => updateTaskDraft({ evidenceRequirement: event.target.value })} /></label>
+                </div>
+                <fieldset className="task-dependencies">
+                  <legend>前置任务（可选）</legend>
+                  {actions.filter(action => action.id !== editingTaskId).length ? actions.filter(action => action.id !== editingTaskId).map(action => (
+                    <label key={action.id}><input type="checkbox" checked={taskDraft.dependencyIds.includes(action.id)} onChange={event => updateTaskDraft({ dependencyIds: event.target.checked ? [...taskDraft.dependencyIds, action.id] : taskDraft.dependencyIds.filter(id => id !== action.id) })} />{action.title}</label>
+                  )) : <span>该目标下还没有其他任务。</span>}
+                </fieldset>
+                <div className="task-editor-actions">
+                  <button type="button" className="secondary-button" disabled={savingTask} onClick={cancelTaskEdit}>取消</button>
+                  <button type="submit" className="primary-button" disabled={savingTask}>{savingTask ? '保存中…' : '保存任务'}</button>
+                </div>
+              </form>}
+
+              <div className="task-change-log">
+                <h4>最近变更</h4>
+                {taskChanges.length ? <ol>{taskChanges.map(change => <li key={change.id}>
+                  <time>{formatDateTime(change.createdAt)}</time><span>{change.summary}</span>
+                  {change.details.fieldChanges?.length ? <details className="task-change-details"><summary>查看字段变化</summary><ul>{change.details.fieldChanges.map((fieldChange, index) => <li key={`${change.id}-${index}`}><strong>{fieldChange.field}</strong><span>原：{formatTaskChangeValue(fieldChange.before, actions)}</span><span>现：{formatTaskChangeValue(fieldChange.after, actions)}</span></li>)}</ul></details> : null}
+                </li>)}</ol> : <p>暂无任务变更记录。</p>}
+              </div>
             </div>
             {renderHistory(plan)}
           </article>
