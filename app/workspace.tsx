@@ -17,6 +17,7 @@ import GoalPlansPanel from './goal-plans-panel';
 import DailyPlanPanel from './daily-plan-panel';
 import type { DailyPlanRecord } from '@/lib/daily-plan-store';
 import type { WeeklyPlan } from '@/lib/daily-planner';
+import CommitmentsPanel from './commitments-panel';
 
 type Graph = {
   evidence: Evidence[];
@@ -277,6 +278,7 @@ export default function Workspace() {
           </div>
 
           <DailyPlanPanel onActionClick={focusDailyAction} onPlanChange={updateDailyPlan} />
+          <CommitmentsPanel />
           <GoalPlansPanel focusActionId={focusedAction?.actionId} />
 
           {selected === 'task' && (
