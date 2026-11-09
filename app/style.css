@@ -7,3 +7,32 @@
  .evidence-history{border-top:1px solid #edf0eb;margin-top:13px;padding-top:10px;color:#7f8d80}.evidence-history summary{cursor:pointer;font-size:10px;color:#718575}.evidence-history ol{list-style:none;padding:0;margin:8px 0 0}.evidence-history li{border-top:1px solid #f0f2ee;padding:9px 0}.evidence-history time{font-size:9px;color:#9aa69a}.evidence-history li p{display:grid;grid-template-columns:70px 1fr;gap:4px 8px;margin:7px 0;font-size:10px;line-height:1.5;overflow-wrap:anywhere}.evidence-history li p strong{grid-column:1/-1;color:#677968;font-weight:600}.evidence-history li p span{color:#889489}.evidence-history li p span:last-child{color:#57715b}
 .goal-plans{margin:35px 0 44px}.goal-plans-heading{margin-bottom:14px}.goal-plans-heading h2{font-size:18px}.goal-empty,.goal-card{border:1px solid #e8ede6;border-radius:9px;background:#fff}.goal-empty{padding:23px}.goal-empty strong{font-size:12px;color:#617765}.goal-empty p,.goal-edit-hint,.goal-capacity-note,.goal-empty-inline{font-size:11px;color:#929e93;line-height:1.7}.goal-empty p{margin:8px 0 0}.goal-card{padding:20px;margin-bottom:12px}.goal-card-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.goal-card-head h3{margin:7px 0 0;font-size:16px;font-weight:600;letter-spacing:-.3px}.goal-state{display:inline-block;padding:5px 8px;border-radius:5px;font-size:10px;font-weight:600}.draft-state{background:#f5f3e9;color:#98824a}.active-state{background:#edf6eb;color:#5c8964}.goal-card .primary-button:disabled{opacity:.45;cursor:not-allowed}.goal-intent{margin:13px 0;color:#89968a;font-size:11px}.goal-validation{margin:14px 0;padding:12px 14px;border-radius:7px;background:#fbf8ef;color:#8b7645;font-size:11px}.goal-validation ul{margin:7px 0 0;padding-left:18px;line-height:1.7}.goal-edit-hint{border-top:1px solid #f0f2ee;margin:14px 0 0;padding-top:11px}.goal-review{flex:none;color:#829283;font-size:10px}.goal-contract{display:grid;grid-template-columns:100px 1fr;gap:10px 12px;border-top:1px solid #eef1ec;border-bottom:1px solid #eef1ec;padding:15px 0;margin:17px 0}.goal-contract dt{font-size:10px;color:#a0aaa0}.goal-contract dd{margin:0;color:#68766b;font-size:11px;line-height:1.65;overflow-wrap:anywhere}.goal-subsection{margin-top:19px}.goal-subsection h4{font-size:11px;font-weight:600;color:#718073;margin:0 0 10px}.goal-milestone{border-left:2px solid #dce8da;padding:3px 0 4px 12px;margin:10px 0}.goal-milestone>div{display:flex;align-items:center;gap:8px}.goal-milestone>div span{font-size:9px;color:#8ca18c;background:#f1f6ef;padding:3px 5px;border-radius:4px}.goal-milestone strong,.goal-actions strong{font-size:11px;font-weight:600;color:#526555}.goal-milestone p{margin:7px 0;color:#829083;font-size:10px;line-height:1.6}.goal-milestone small{display:block;color:#99a49a;font-size:9px;line-height:1.6;margin-top:4px}.goal-milestone .goal-review-note{color:#738775}.goal-evidence-requirements{margin:0;padding-left:18px;color:#879487;font-size:10px;line-height:1.8}.goal-evidence-requirements strong{color:#66866a}.goal-actions{list-style:none;margin:0;padding:0}.goal-actions li{display:flex;align-items:flex-start;gap:9px;padding:10px 0;border-top:1px solid #f1f3ef}.goal-actions li>span{flex:none;border-radius:4px;background:#f5f4ec;padding:4px 6px;color:#9a8a5e;font-size:9px}.goal-actions li>div{flex:1;min-width:0}.goal-actions small{display:block;margin-top:4px;color:#929e93;font-size:10px;line-height:1.6}.goal-actions em{flex:none;color:#a4aea4;font-size:9px;font-style:normal}.goal-capacity-note{margin:10px 0 0;text-align:right}.goal-empty-inline{margin:0}
 @media(max-width:650px){.goal-card{padding:15px}.goal-card-head{align-items:flex-start;flex-direction:column}.goal-contract{grid-template-columns:76px 1fr}.goal-capacity-note{text-align:left}}
+
+.goal-lifecycle-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0}
+.goal-lifecycle-actions button{font:inherit;cursor:pointer}
+.goal-lifecycle-actions button:disabled{opacity:.5;cursor:not-allowed}
+.goal-lifecycle-actions .secondary-button{border:1px solid #dfe7dd;border-radius:6px;background:#fff;color:#657768;padding:7px 10px;font-size:10px}
+.goal-lifecycle-actions .text-button{border:0;background:transparent;color:#879489;padding:7px 6px;font-size:10px}
+.paused-state{background:#f1f3f5;color:#667788}
+.ended-state{background:#f4f1ef;color:#83766f}
+.historical-goal{background:#fcfdfb}
+.goal-history-section{margin-top:30px}
+.goal-lifecycle-reason{margin:11px 0;color:#78867b;font-size:11px;line-height:1.7}
+.goal-lifecycle-history{margin-top:14px;border-top:1px solid #eef1ec;padding-top:10px;color:#7f8b80;font-size:10px}
+.goal-lifecycle-history summary{cursor:pointer;color:#738174}
+.goal-lifecycle-history ol{margin:9px 0 0;padding-left:18px}
+.goal-lifecycle-history li{padding:5px 0;line-height:1.6}
+.goal-lifecycle-history li span{color:#637264}
+.goal-lifecycle-history time{margin-left:8px;color:#a0aaa0;font-size:9px}
+.goal-lifecycle-history li p{margin:3px 0;color:#89958a;overflow-wrap:anywhere}
+.goal-completion-form,.goal-completion-review{margin:14px 0;padding:14px;border:1px solid #e5ece2;border-radius:8px;background:#f9fbf8;color:#69786b;font-size:11px}
+.goal-completion-form>strong,.goal-completion-review>strong{color:#58705b}
+.goal-completion-form>p{margin:7px 0 12px;color:#89958a;line-height:1.6}
+.goal-completion-form fieldset{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;margin:10px 0;padding:10px;border:1px solid #e7ece5;border-radius:6px}
+.goal-completion-form legend{padding:0 4px;color:#647765;font-size:10px}
+.goal-completion-form fieldset>p{grid-column:1/-1;margin:0;color:#929d93;font-size:10px;line-height:1.5}
+.goal-completion-form label{display:flex;flex-direction:column;gap:5px;color:#829082;font-size:10px}
+.goal-completion-form textarea,.goal-completion-form select{width:100%;border:1px solid #dfe6dd;border-radius:5px;background:white;color:#566558;padding:7px;font:inherit}
+.goal-completion-review ul{margin:8px 0;padding-left:18px;line-height:1.7;color:#839084;overflow-wrap:anywhere}
+.goal-completion-review .goal-lifecycle-actions{margin-bottom:0}
+@media(max-width:650px){.goal-completion-form fieldset{grid-template-columns:1fr}.goal-completion-form fieldset>p{grid-column:auto}.goal-lifecycle-actions{align-items:flex-start}}

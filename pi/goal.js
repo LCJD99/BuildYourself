@@ -60,7 +60,15 @@ function describePlan(plan) {
   const actions = plan.nextActions.map(item => `- ${item.title || '待补充'}${item.details ? `：${item.details}` : ''}${item.estimateMinutes ? `（约 ${item.estimateMinutes} 分钟）` : ''} · ${item.specificity === 'concrete' ? '具体行动' : '待细化'}`).join('\n') || '待补充';
   const evidence = plan.evidenceRequirements.map(item => `- ${item.item || '待补充'}：${item.description || '待补充'}（最低 ${item.minimumLevel || '待设置'}）`).join('\n') || '待补充';
   const constraints = plan.constraints.status === 'confirmed' ? (plan.constraints.items.join('；') || '已确认无额外限制') : '待确认';
-  return `草稿 ID：${plan.id}\n目标：${plan.title || '未命名目标'}\n状态：${plan.status === 'draft' ? '草稿（尚未启用，不进入自动规划）' : '已启用'}\n使用场景：${plan.context || '待补充'}\n成功描述：${plan.successDescription || '待补充'}\n可观察结果：${plan.observableResult || '待补充'}\n当前基础：${plan.baselineStatus}${plan.baselineAction ? `；基线行动：${plan.baselineAction}` : ''}\n关键限制：${constraints}\n复盘周期：${plan.reviewCycleDays ? `每 ${plan.reviewCycleDays} 天` : '待补充'}\n里程碑：\n${milestones}\n近期行动：\n${actions}\n证据要求：\n${evidence}${blockers}`;
+  const status = {
+    draft: '草稿（尚未启用，不进入自动规划）',
+    active: '活跃（进入待排池）',
+    paused: '已暂停（保留历史，退出待排池）',
+    completed: '已完成',
+    archived: '已归档',
+    abandoned: '已放弃',
+  }[plan.status] || plan.status;
+  return `目标 ID：${plan.id}\n目标：${plan.title || '未命名目标'}\n状态：${status}${plan.lifecycleReason ? `\n状态原因：${plan.lifecycleReason}` : ''}\n使用场景：${plan.context || '待补充'}\n成功描述：${plan.successDescription || '待补充'}\n可观察结果：${plan.observableResult || '待补充'}\n当前基础：${plan.baselineStatus}${plan.baselineAction ? `；基线行动：${plan.baselineAction}` : ''}\n关键限制：${constraints}\n复盘周期：${plan.reviewCycleDays ? `每 ${plan.reviewCycleDays} 天` : '待补充'}\n里程碑：\n${milestones}\n近期行动：\n${actions}\n证据要求：\n${evidence}${blockers}`;
 }
 
 export default function (pi) {

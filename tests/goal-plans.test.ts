@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import {
   listGoalPlans,
   listPendingGoalActions,
   saveGoalPlanDraft,
+  transitionGoalPlan,
   updateGoalPlanDraft,
 } from '../lib/goal-plans';
 
@@ -160,5 +162,103 @@ describe('目标计划草稿与激活', () => {
     expect(() => activateGoalPlan(extra.id)).toThrow('活跃目标已达到 10 个');
     expect(listGoalPlans().find(plan => plan.id === extra.id)?.status).toBe('draft');
     expect(listPendingGoalActions()).toHaveLength(10);
+  });
+
+  it('暂停目标会保留历史待办并退出待排池，恢复时重新占用活跃名额', () => {
+    const draft = saveGoalPlanDraft(completePlan());
+    activateGoalPlan(draft.id);
+
+    const paused = transitionGoalPlan(draft.id, { action: 'pause', reason: '本周优先处理项目交付' });
+
+    expect(paused.status).toBe('paused');
+    expect(paused.lifecycleReason).toBe('本周优先处理项目交付');
+    expect(listPendingGoalActions()).toEqual([]);
+    expect(paused.lifecycleEvents.map(event => event.action)).toEqual(['created', 'activated', 'paused']);
+
+    expect(transitionGoalPlan(draft.id, { action: 'resume' }).status).toBe('active');
+    expect(listPendingGoalActions()).toHaveLength(1);
+  });
+
+  it('归档与放弃都要求原因并留下可回查的终态记录', () => {
+    const archived = saveGoalPlanDraft(completePlan());
+    const abandoned = saveGoalPlanDraft(completePlan({ title: '放弃目标' }));
+    activateGoalPlan(archived.id);
+    activateGoalPlan(abandoned.id);
+
+    expect(() => transitionGoalPlan(archived.id, { action: 'archive', reason: '  ' })).toThrow('请填写归档原因');
+    expect(transitionGoalPlan(archived.id, { action: 'archive', reason: '目标方向已变化' })).toMatchObject({
+      status: 'archived', lifecycleReason: '目标方向已变化',
+    });
+    expect(transitionGoalPlan(abandoned.id, { action: 'abandon', reason: '目前不再投入时间' })).toMatchObject({
+      status: 'abandoned', lifecycleReason: '目前不再投入时间',
+    });
+    expect(listGoalPlans().find(plan => plan.id === archived.id)?.lifecycleEvents.at(-1)).toMatchObject({
+      action: 'archived', reason: '目标方向已变化', fromStatus: 'active', toStatus: 'archived',
+    });
+  });
+
+  it('完成请求必须满足每项证据等级并等待单独确认', () => {
+    const draft = saveGoalPlanDraft(completePlan());
+    activateGoalPlan(draft.id);
+    const requirement = draft.evidenceRequirements[0];
+    const evidence = [{ requirementId: requirement.id, description: '录音文件：baseline.mp3', level: 'E2' }];
+
+    expect(() => transitionGoalPlan(draft.id, { action: 'request_completion', evidence: [] })).toThrow('每项证据要求都需要提交证据');
+    expect(() => transitionGoalPlan(draft.id, {
+      action: 'request_completion',
+      evidence: [{ ...evidence[0], level: 'E1' }],
+    })).toThrow('证据等级未达到要求');
+
+    const requested = transitionGoalPlan(draft.id, { action: 'request_completion', evidence });
+    expect(requested.status).toBe('active');
+    expect(requested.pendingCompletion).toMatchObject({ evidence });
+    expect(requested.lifecycleEvents.at(-1)?.action).toBe('completion_requested');
+
+    expect(() => transitionGoalPlan(draft.id, { action: 'confirm_completion' })).toThrow('需要单独确认完成');
+    const completed = transitionGoalPlan(draft.id, { action: 'confirm_completion', confirmed: true });
+    expect(completed).toMatchObject({ status: 'completed', completedAt: expect.any(String), pendingCompletion: null });
+    expect(completed.lifecycleEvents.at(-1)).toMatchObject({ action: 'completion_confirmed', fromStatus: 'active', toStatus: 'completed' });
+  });
+
+  it('暂停后释放的名额可被新目标占用，满额时不能恢复旧目标', () => {
+    const plans = Array.from({ length: 10 }, (_, index) => saveGoalPlanDraft(completePlan({ title: `目标 ${index + 1}` })));
+    plans.forEach(plan => activateGoalPlan(plan.id));
+    transitionGoalPlan(plans[0].id, { action: 'pause' });
+    const replacement = saveGoalPlanDraft(completePlan({ title: '替补目标' }));
+    activateGoalPlan(replacement.id);
+
+    expect(() => transitionGoalPlan(plans[0].id, { action: 'resume' })).toThrow('活跃目标已达到 10 个');
+    expect(listPendingGoalActions()).toHaveLength(10);
+  });
+
+  it('升级已有两态数据库时保留目标、待排行动和迁移状态记录', () => {
+    const databasePath = join(dir, `legacy-${randomUUID()}.sqlite`);
+    process.env.BUILDYOURSELF_DB = databasePath;
+    const database = new DatabaseSync(databasePath);
+    database.exec(`
+      PRAGMA foreign_keys=ON;
+      CREATE TABLE goal_plans (
+        id TEXT PRIMARY KEY, source_intent TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('draft', 'active')),
+        plan_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, activated_at TEXT
+      );
+      CREATE TABLE goal_plan_actions (
+        id TEXT PRIMARY KEY, goal_plan_id TEXT NOT NULL REFERENCES goal_plans(id) ON DELETE CASCADE,
+        title TEXT NOT NULL, details TEXT, estimate_minutes INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('pending_schedule', 'scheduled', 'done')), created_at TEXT NOT NULL
+      );
+    `);
+    const now = new Date().toISOString();
+    database.prepare('INSERT INTO goal_plans VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('legacy-goal', '我想学英语', 'active', JSON.stringify(completePlan()), now, now, now);
+    database.prepare('INSERT INTO goal_plan_actions VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('legacy-action', 'legacy-goal', '继续练习', null, 15, 'pending_schedule', now);
+    database.close();
+
+    const plans = listGoalPlans();
+
+    expect(plans[0]).toMatchObject({ status: 'active', completedAt: null, lifecycleReason: null });
+    expect(plans[0].lifecycleEvents).toMatchObject([{ action: 'imported', toStatus: 'active' }]);
+    expect(listPendingGoalActions()).toMatchObject([{ id: 'legacy-action', goalPlanId: 'legacy-goal' }]);
   });
 });
