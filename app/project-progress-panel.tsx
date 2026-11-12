@@ -5,6 +5,7 @@ import type { GoalPlanAction, GoalProject } from '@/lib/goal-plans';
 import { deriveProjectProgress, type ProjectProgressModel, type ProjectProgressObservation, type ProjectProgressView } from '@/lib/project-progress';
 import type { ProjectDeliverable } from '@/lib/project-deliverables';
 import type { ProjectMeasurementSeries } from '@/lib/project-measurement-series';
+import { latencyChartGeometry } from '@/lib/project-progress-visuals';
 
 const viewLabels: Record<ProjectProgressView, string> = {
   evidence: '证据概览',
@@ -37,32 +38,79 @@ function TrendChart({ observations }: { observations: ProjectProgressObservation
     </div>;
   }
 
-  const values = observations.map(item => item.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const width = 640;
-  const height = 200;
-  const points = observations.map((item, index) => {
-    const x = observations.length === 1 ? width / 2 : 38 + (index / (observations.length - 1)) * (width - 76);
-    const y = max === min ? height / 2 : height - 38 - ((item.value - min) / (max - min)) * (height - 76);
-    return { ...item, x, y };
-  });
+  const geometry = latencyChartGeometry(observations);
+  if (!geometry) return <p className="project-progress-gap">至少需要两次已确认可比较的观测才能绘制趋势。</p>;
+  const { width, height, plot, plotWidth, minMs, maxMs, timeScale, xAxisLabel, yTicks, points } = geometry;
+  const hasDistinctTimes = timeScale === 'timestamp';
+  const chartDescription = `共 ${observations.length} 条已确认可比较的完整基准延迟观测，单位毫秒。纵轴显示实际观测值；横轴${hasDistinctTimes ? '按实际观测时间缩放' : '由于观测时间相同，使用等距记录顺序'}。`;
   return <>
-    <div className="project-trend-chart-wrap">
-      <svg className="project-trend-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="按观测时间排列的完整基准延迟实测值，单位毫秒">
-        <line x1="38" x2={width - 38} y1={height - 30} y2={height - 30} />
+    <figure className="project-trend-figure">
+      <div className="project-trend-chart-wrap">
+        <svg className="project-trend-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="project-trend-chart-title project-trend-chart-description">
+        <title id="project-trend-chart-title">完整基准延迟趋势图</title>
+        <desc id="project-trend-chart-description">{chartDescription}</desc>
+        {yTicks.map(tick => <g key={`${tick.value}-${tick.y}`}>
+          <line className="project-trend-gridline" x1={plot.left} x2={width - plot.right} y1={tick.y} y2={tick.y} />
+          <text className="project-trend-tick" x={plot.left - 8} y={tick.y + 4} textAnchor="end">{tick.value}</text>
+        </g>)}
+        <line className="project-trend-axis" x1={plot.left} x2={plot.left} y1={plot.top} y2={height - plot.bottom} />
+        <line className="project-trend-axis" x1={plot.left} x2={width - plot.right} y1={height - plot.bottom} y2={height - plot.bottom} />
         <polyline points={points.map(point => `${point.x},${point.y}`).join(' ')} />
         {points.map((point, index) => <g key={point.id}>
+          <title>{`${formatDateTime(point.observedAt)} · ${point.value} ms · ${point.source} · ${point.reference}`}</title>
           <circle cx={point.x} cy={point.y} r="4" />
-          <text x={point.x} y={point.y - 10} textAnchor="middle">{point.value} ms</text>
-          {(index === 0 || index === points.length - 1) && <text className="project-trend-date" x={point.x} y={height - 10} textAnchor={index === 0 ? 'start' : 'end'}>{new Date(point.observedAt).toLocaleDateString('zh-CN')}</text>}
+          {(points.length <= 8 || index === 0 || index === points.length - 1) && <text className="project-trend-point-label" x={point.x} y={point.y - 9} textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}>{point.value}</text>}
         </g>)}
-      </svg>
-    </div>
+        <text className="project-trend-axis-label" x="18" y={plot.top + geometry.plotHeight / 2} textAnchor="middle" transform={`rotate(-90 18 ${plot.top + geometry.plotHeight / 2})`}>实测延迟（ms）</text>
+        <text className="project-trend-axis-label" x={plot.left + plotWidth / 2} y={height - 6} textAnchor="middle">{xAxisLabel}</text>
+        <text className="project-trend-date" x={plot.left} y={height - plot.bottom + 18} textAnchor="start">{new Date(observations[0].observedAt).toLocaleDateString('zh-CN')}</text>
+        <text className="project-trend-date" x={width - plot.right} y={height - plot.bottom + 18} textAnchor="end">{new Date(observations[observations.length - 1].observedAt).toLocaleDateString('zh-CN')}</text>
+        </svg>
+      </div>
+      <figcaption>纵轴范围为本序列实际观测最小值 {minMs} 至最大值 {maxMs} ms。仅绘制此已确认口径下的观测。{hasDistinctTimes ? '横向位置按真实观测时间缩放。' : '观测时间相同，横向等距仅区分记录，不代表时间间隔。'}</figcaption>
+    </figure>
     <ul className="project-trend-observations">{observations.map(item => <li key={item.id}>
       <strong>{item.value} ms</strong><span>{formatDateTime(item.observedAt)} · {item.level} · {item.source}</span><small>{item.reference} · {item.text}</small>
     </li>)}</ul>
   </>;
+}
+
+function MilestoneMap({ model, project, contractVersions }: {
+  model: ProjectProgressModel;
+  project: GoalProject;
+  contractVersions: Array<{ goalPlanId: string; version: number | null }>;
+}) {
+  const stages = [
+    { id: 'near', label: '近期' },
+    { id: 'future', label: '远期' },
+  ] as const;
+  return <div className="project-milestone-map" role="group" aria-label="按当前目标契约阶段分组的项目里程碑图">
+    <p className="project-milestone-map-note">只展示项目明确关联的当前里程碑；同一阶段内的排列不代表日期、依赖或完成度。</p>
+    <div className="project-milestone-lanes">{stages.map(stage => {
+      const milestones = model.milestones.filter(item => item.stage === stage.id);
+      return <section className="project-milestone-lane" key={stage.id} aria-labelledby={`project-milestone-lane-${stage.id}`}>
+        <header><h4 id={`project-milestone-lane-${stage.id}`}>{stage.label}</h4><span>{milestones.length} 项</span></header>
+        {milestones.length ? <ul>{milestones.map(milestone => {
+          const linkedEvidence = project.evidence.filter(item => milestone.evidenceIds.includes(item.id));
+          const contractVersion = contractVersions.find(item => item.goalPlanId === milestone.goalPlanId)?.version ?? null;
+          return <li key={`${milestone.goalPlanId}:${milestone.id}`}>
+            <span className="project-milestone-map-marker" aria-hidden="true" />
+            <article>
+              <header><span>{milestone.goalTitle} · 当前契约 {contractVersion === null ? '版本未知' : `V${contractVersion}`}</span><strong>{milestone.title}</strong></header>
+              {milestone.successCriteria && <p><b>当前契约标准</b>：{milestone.successCriteria}</p>}
+              {milestone.evidenceRequirement && <p><b>证据要求</b>：{milestone.evidenceRequirement}</p>}
+              <p className="project-progress-version-note">当前契约标准只作当前参考；本视图不会用它回判历史观测。</p>
+              <p className="project-progress-status">{milestone.evidenceStatus}</p>
+              <p className="project-progress-gap">{milestone.gap}</p>
+              {linkedEvidence.map(item => <div className="project-progress-linked-evidence" key={item.id}>
+                <strong>{item.reference}</strong><span>{item.level} · {item.source} · {formatDateTime(item.observedAt)}</span><p>{item.text}</p>
+              </div>)}
+            </article>
+          </li>;
+        })}</ul> : <p className="project-progress-gap">当前契约未记录此阶段的显式里程碑。</p>}
+      </section>;
+    })}</div>
+  </div>;
 }
 
 export default function ProjectProgressPanel({ project, actions, contractVersions }: {
@@ -214,21 +262,7 @@ export default function ProjectProgressPanel({ project, actions, contractVersion
     </div>}
 
     {view === 'milestones' && <div className="project-progress-milestones">
-      {model.milestones.length ? model.milestones.map(milestone => {
-        const linkedEvidence = project.evidence.filter(item => milestone.evidenceIds.includes(item.id));
-        const contractVersion = contractVersions.find(item => item.goalPlanId === milestone.goalPlanId)?.version ?? null;
-        return <article key={`${milestone.goalPlanId}:${milestone.id}`}>
-          <header><span>{milestone.goalTitle} · {milestone.stage === 'near' ? '近期' : '远期'} · 当前契约 {contractVersion === null ? '版本未知' : `V${contractVersion}`}</span><strong>{milestone.title}</strong></header>
-          {milestone.successCriteria && <p><b>当前契约标准</b>：{milestone.successCriteria}</p>}
-          {milestone.evidenceRequirement && <p><b>证据要求</b>：{milestone.evidenceRequirement}</p>}
-          <p className="project-progress-version-note">此处标准来自目标当前契约版本；本视图不会用它回判历史观测，也不显示历史版本评价。</p>
-          <p className="project-progress-status">{milestone.evidenceStatus}</p>
-          <p className="project-progress-gap">{milestone.gap}</p>
-          {linkedEvidence.map(item => <div className="project-progress-linked-evidence" key={item.id}>
-            <strong>{item.reference}</strong><span>{item.level} · {item.source} · {formatDateTime(item.observedAt)}</span><p>{item.text}</p>
-          </div>)}
-        </article>;
-      }) : <p className="project-progress-gap">项目没有显式关联的目标里程碑。</p>}
+      {model.milestones.length ? <MilestoneMap model={model} project={project} contractVersions={contractVersions} /> : <p className="project-progress-gap">项目没有显式关联的目标里程碑，因此没有可绘制的里程碑图。</p>}
     </div>}
 
     {view === 'trend' && <div className="project-progress-trend">
