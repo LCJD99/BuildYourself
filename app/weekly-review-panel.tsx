@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { WeeklyReviewAdjustment, WeeklyReviewRecord } from '@/lib/weekly-review-store';
+import type { WeeklyGoalEvaluation, WeeklyReviewAdjustment, WeeklyReviewRecord } from '@/lib/weekly-review-store';
 
 function localDateString(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -16,6 +16,12 @@ function currentWeekStart() {
 
 function readableDate(value: string) {
   return new Date(`${value}T00:00:00`).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+function evaluationStatusLabel(evaluation: WeeklyGoalEvaluation) {
+  if (evaluation.status === 'confirmed') return '已确认';
+  if (evaluation.status === 'pending_confirmation') return '待确认';
+  return evaluation.status === 'insufficient' ? '证据不足' : '待复核';
 }
 
 function addDays(value: string, amount: number) {
@@ -116,8 +122,12 @@ export default function WeeklyReviewPanel() {
         <section className="weekly-review-goals"><h3>实际目标与里程碑</h3>
           {review.goals.length ? review.goals.map(goal => <article className="weekly-review-goal" key={goal.goalPlanId}>
             <div><strong>{goal.title}</strong><span>目标状态：{goal.status}</span></div>
+            <p>{goal.contractVersion === null
+              ? '该复盘周没有已生效的历史目标契约；系统未套用当前标准评价过去的进展。'
+              : `本周评价规则采用契约 v${goal.contractVersion}（${new Date(goal.contractEffectiveAt!).toLocaleString('zh-CN')} 生效）：${goal.contractChangeSummary ?? '目标初始契约'}`}</p>
             <p>目标标准：{goal.successDescription ?? '尚未填写'} · 本周完成 {goal.completedActionCount} 项行动，计划 {goal.plannedActionCount} 项 / {goal.plannedMinutes} 分钟估算，关联证据 {goal.evidenceCount} 条（E2/E3 {goal.qualifiedEvidenceCount} 条，为目标关联证据等级统计）。</p>
-            {goal.milestones.length ? <ul>{goal.milestones.map(milestone => <li key={milestone.milestoneId}><strong>能力进展：{milestone.title}</strong><span>{milestone.status}</span><small>成功标准：{milestone.successCriteria ?? '尚无成功标准'} · 证据门槛：{milestone.requiredEvidenceLevel}（{milestone.evidenceRequirementSource}）· 关联行动完成 {milestone.completedActionCount}/{milestone.associatedActionCount} · 达到门槛的关联证据 {milestone.qualifiedEvidenceCount} 条{milestone.gap !== '证据需要与成功标准一同核对。' ? ` · ${milestone.gap}` : ''}</small></li>)}</ul> : <p>该目标没有配置里程碑，当前无法按里程碑评价进展。</p>}
+            {goal.milestones.length ? <ul>{goal.milestones.map(milestone => <li key={milestone.milestoneId}><strong>能力进展：{milestone.title}</strong><span>{milestone.status}</span><small>成功标准：{milestone.successCriteria ?? '尚无成功标准'} · 证据门槛：{milestone.requiredEvidenceLevel}（{milestone.evidenceRequirementSource}）· 关联行动完成 {milestone.completedActionCount}/{milestone.associatedActionCount} · 达到门槛的关联证据 {milestone.qualifiedEvidenceCount} 条{milestone.evidenceBeforeContractCount ? ` · ${milestone.evidenceBeforeContractCount} 条契约生效前证据仅作历史记录` : ''}{milestone.gap !== '证据需要与成功标准一同核对。' ? ` · ${milestone.gap}` : ''}</small></li>)}</ul> : goal.contractVersion === null ? <p>该周没有可依据的历史里程碑标准，因此不自动判定能力进展。</p> : <p>该目标在本周适用的契约中没有配置里程碑。</p>}
+            {goal.evaluations.length ? <ul>{goal.evaluations.map(evaluation => <li key={evaluation.id}><strong>已记录进展评价 · 契约 v{evaluation.contractVersion} · {evaluation.outcome === 'met' ? '达到标准' : evaluation.outcome === 'not_met' ? '未达标准' : '证据不足'}</strong><span>{evaluationStatusLabel(evaluation)}</span><small>规则快照：{evaluation.ruleSnapshot.milestone?.successCriteria ?? evaluation.ruleSnapshot.successDescription ?? '未设置'} · {evaluation.summary} · 证据 {evaluation.evidenceIds.length} 条</small></li>)}</ul> : null}
           </article>) : <p>本周没有活跃目标或目标活动记录；系统不会用示例图谱替代真实目标复盘。</p>}
         </section>
         <section className="weekly-review-gaps"><h3>证据缺口与计划偏差</h3>

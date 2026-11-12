@@ -3,9 +3,19 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activateGoalPlan, listGoalPlanActions, markGoalPlanActionDone, saveGoalPlanDraft, updateGoalPlanAction } from '../lib/goal-plans';
+import {
+  activateGoalPlan,
+  createGoalPlanContractChange,
+  listGoalPlanActions,
+  listGoalPlans,
+  markGoalPlanActionDone,
+  recordGoalPlanEvaluation,
+  resolveGoalPlanContractChange,
+  saveGoalPlanDraft,
+  updateGoalPlanAction,
+} from '../lib/goal-plans';
 import { confirmDailyPlan, generateAndSaveDailyPlan } from '../lib/daily-plan-store';
-import { saveEvidence } from '../lib/store';
+import { openDatabase, saveEvidence } from '../lib/store';
 import { getWeeklyReview, saveWeeklyReview } from '../lib/weekly-review-store';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-weekly-review-'));
@@ -17,6 +27,12 @@ function currentWeekStart() {
   const day = today.getUTCDay();
   today.setUTCDate(today.getUTCDate() - ((day + 6) % 7));
   return today.toISOString().slice(0, 10);
+}
+
+function previousWeekStart() {
+  const date = new Date(`${currentWeekStart()}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - 7);
+  return date.toISOString().slice(0, 10);
 }
 
 function createGoalPlan(minimumLevel: 'E2' | 'E3' = 'E2', successCriteria = '完整基准测试响应延迟低于 200 ms') {
@@ -167,6 +183,93 @@ describe('目标周复盘', () => {
     expect(milestone.qualifiedEvidenceCount).toBe(1);
     expect(milestone.status).toContain('达到标准');
     expect(review.adjustment.title).toContain('复测');
+  });
+
+  it('历史周复盘使用当周生效的契约版本，并保留历史评价所用规则', () => {
+    const weekStart = previousWeekStart();
+    const goalPlanId = createGoalPlan('E2');
+    const database = openDatabase();
+    database.prepare('UPDATE goal_plan_contract_versions SET effective_at=? WHERE goal_plan_id=? AND version=1')
+      .run(`${weekStart}T00:00:00.000Z`, goalPlanId);
+    database.close();
+
+    const currentGoal = listGoalPlans().find(goal => goal.id === goalPlanId)!;
+    const change = createGoalPlanContractChange(goalPlanId, {
+      summary: '提高里程碑证据标准',
+      plan: {
+        successDescription: '完整基准测试响应延迟低于 150 ms。',
+        milestones: currentGoal.milestones.map(milestone => ({
+          ...milestone,
+          successCriteria: '完整基准测试响应延迟低于 150 ms',
+          evidenceRequirement: '完整基准测试 E3 结果。',
+        })),
+        evidenceRequirements: currentGoal.evidenceRequirements.map(requirement => ({ ...requirement, minimumLevel: 'E3' as const })),
+      },
+    });
+    resolveGoalPlanContractChange(goalPlanId, change.id, { action: 'confirm', confirmed: true });
+    recordGoalPlanEvaluation(goalPlanId, {
+      outcome: 'not_met', summary: '当周评价低于原标准', reasons: ['按当周标准比较。'], evidenceIds: [],
+      milestoneId: 'latency-milestone', observedAt: `${weekStart}T12:00:00.000Z`, backfill: true,
+    });
+
+    const { review } = getWeeklyReview(weekStart, 'UTC');
+    const goal = review.goals.find(item => item.goalPlanId === goalPlanId)!;
+    expect(goal.contractVersion).toBe(1);
+    expect(goal.successDescription).toContain('200 ms');
+    expect(goal.milestones[0].requiredEvidenceLevel).toBe('E2');
+    expect(goal.evaluations).toHaveLength(1);
+    expect(goal.evaluations[0]).toMatchObject({ contractVersion: 1, outcome: 'not_met' });
+    expect(goal.evaluations[0].ruleSnapshot.milestone?.successCriteria).toContain('200 ms');
+    expect(goal.evaluations[0].ruleSnapshot.minimumEvidenceLevel).toBe('E2');
+  });
+
+  it('周中变更契约后，生效前采集的测量不会按新标准重新判定', () => {
+    const weekStart = currentWeekStart();
+    const goalPlanId = createGoalPlan('E2');
+    const database = openDatabase();
+    database.prepare('UPDATE goal_plan_contract_versions SET effective_at=? WHERE goal_plan_id=? AND version=1')
+      .run(`${weekStart}T00:00:00.000Z`, goalPlanId);
+    database.close();
+    const currentGoal = listGoalPlans().find(goal => goal.id === goalPlanId)!;
+    const change = createGoalPlanContractChange(goalPlanId, {
+      summary: '提高证据门槛并收紧响应延迟标准',
+      plan: {
+        successDescription: '完整基准测试响应延迟低于 100 ms。',
+        milestones: currentGoal.milestones.map(milestone => ({
+          ...milestone,
+          successCriteria: '完整基准测试响应延迟低于 100 ms',
+          evidenceRequirement: '完整基准测试 E3 结果。',
+        })),
+        evidenceRequirements: currentGoal.evidenceRequirements.map(requirement => ({ ...requirement, minimumLevel: 'E3' as const })),
+      },
+    });
+    resolveGoalPlanContractChange(goalPlanId, change.id, { action: 'confirm', confirmed: true });
+    const newContractDate = new Date(`${weekStart}T00:00:00.000Z`);
+    newContractDate.setUTCDate(newContractDate.getUTCDate() + 2);
+    const midweekEffectiveAt = `${newContractDate.toISOString().slice(0, 10)}T12:00:00.000Z`;
+    const versionDatabase = openDatabase();
+    versionDatabase.prepare('UPDATE goal_plan_contract_versions SET effective_at=? WHERE goal_plan_id=? AND version=2')
+      .run(midweekEffectiveAt, goalPlanId);
+    versionDatabase.close();
+
+    const action = listGoalPlanActions(goalPlanId)[0];
+    markGoalPlanActionDone(action.id);
+    const evidence = saveEvidence({
+      text: '契约变更前延迟 190 ms', source: '测试报告', reference: 'before-contract-change',
+      observedAt: `${weekStart}T12:00:00.000Z`, links: ['milestone'], level: 'E2',
+      reportSubmitted: null, latencyMs: 190, benchmarkComplete: true, goalPlanId, goalActionId: action.id,
+    });
+
+    const { review } = getWeeklyReview(weekStart, 'UTC');
+    const goal = review.goals.find(item => item.goalPlanId === goalPlanId)!;
+    const milestone = goal.milestones[0];
+    expect(goal.contractVersion).toBe(2);
+    expect(milestone.evidenceCount).toBe(0);
+    expect(milestone.evidenceBeforeContractCount).toBe(1);
+    expect(milestone.qualifiedEvidenceCount).toBe(0);
+    expect(milestone.status).not.toContain('达到标准');
+    expect(milestone.gap).toContain('早于契约生效时间');
+    expect(review.evidence.map(item => item.id)).toContain(evidence.id);
   });
 
   it('把秒转换为毫秒，并按不高于边界判定响应时间标准', () => {

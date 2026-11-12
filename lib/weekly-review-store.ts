@@ -3,7 +3,16 @@ import type { Evidence, EvidenceLevel } from './model';
 import { getDailyPlan } from './daily-plan-store';
 import { listChangeEvents } from './milestone-store';
 import { listReplanProposals } from './replanning';
-import { listGoalPlans, type GoalMilestone, type GoalPlan } from './goal-plans';
+import {
+  listGoalPlanContractVersions,
+  listGoalPlanEvaluations,
+  listGoalPlans,
+  type GoalMilestone,
+  type GoalPlan,
+  type GoalPlanContractVersion,
+  type GoalPlanEvaluation,
+  type GoalPlanEvaluationRuleSnapshot,
+} from './goal-plans';
 import { getHistoryCalendar, type HistoryCalendarActivity } from './history-calendar';
 
 export type WeeklyReviewAdjustment = {
@@ -36,6 +45,7 @@ export type WeeklyMilestoneReview = {
   associatedActionCount: number;
   completedActionCount: number;
   evidenceCount: number;
+  evidenceBeforeContractCount: number;
   qualifiedEvidenceCount: number;
   evidenceIds: string[];
   status: string;
@@ -46,6 +56,9 @@ export type WeeklyGoalReview = {
   goalPlanId: string;
   title: string;
   status: GoalPlan['status'];
+  contractVersion: number | null;
+  contractEffectiveAt: string | null;
+  contractChangeSummary: string | null;
   successDescription: string | null;
   completedAt: string | null;
   plannedActionCount: number;
@@ -54,6 +67,20 @@ export type WeeklyGoalReview = {
   evidenceCount: number;
   qualifiedEvidenceCount: number;
   milestones: WeeklyMilestoneReview[];
+  evaluations: WeeklyGoalEvaluation[];
+};
+
+export type WeeklyGoalEvaluation = {
+  id: string;
+  observedAt: string;
+  outcome: GoalPlanEvaluation['outcome'];
+  status: GoalPlanEvaluation['status'];
+  summary: string;
+  milestoneId: string | null;
+  contractVersionId: string;
+  contractVersion: number;
+  ruleSnapshot: GoalPlanEvaluationRuleSnapshot;
+  evidenceIds: string[];
 };
 
 export type WeeklyPlannedAction = {
@@ -94,6 +121,7 @@ export type WeeklyReview = {
 
 export type WeeklyReviewRecord = { review: WeeklyReview; status: 'draft' | 'saved'; savedAt: string | null };
 type GoalActionRelation = { id: string; goalPlanId: string; title: string; status: 'pending_schedule' | 'scheduled' | 'done'; milestoneId: string | null; evidenceRequirement: string | null; completedAt: string | null };
+type WeeklyReviewGoalPlan = GoalPlan & { reviewContractEffectiveAt: string | null };
 
 function assertWeekStart(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('周起始日期必须是有效的 YYYY-MM-DD 日期。');
@@ -123,6 +151,13 @@ function dateKey(timestamp: string, timeZone: string): string | null {
 function isWithinWeek(value: string, weekStart: string, nextWeekStart: string, timeZone: string) {
   const date = dateKey(value, timeZone);
   return Boolean(date && date >= weekStart && date < nextWeekStart);
+}
+
+function contractVersionForReviewWeek(versions: GoalPlanContractVersion[], weekEnd: string, timeZone: string) {
+  return versions.filter(version => {
+    const effectiveDate = dateKey(version.effectiveAt, timeZone);
+    return effectiveDate !== null && effectiveDate <= weekEnd;
+  }).sort((a, b) => a.effectiveAt.localeCompare(b.effectiveAt) || a.version - b.version).at(-1) ?? null;
 }
 
 function parseLatencyTarget(milestone: GoalMilestone): { limit: number; inclusive: boolean } | null {
@@ -232,7 +267,7 @@ function listGoalActionRelations(goalPlanIds: string[]): GoalActionRelation[] {
   }
 }
 
-function makeSetupAdjustment(weekStart: string, goal?: GoalPlan): WeeklyReviewAdjustment {
+function makeSetupAdjustment(weekStart: string, goal?: GoalPlan, historicalContractMissing = false): WeeklyReviewAdjustment {
   return {
     kind: 'setup',
     goalPlanId: goal?.id ?? null,
@@ -241,26 +276,34 @@ function makeSetupAdjustment(weekStart: string, goal?: GoalPlan): WeeklyReviewAd
     milestoneTitle: null,
     actionId: null,
     actionTitle: null,
-    title: goal ? '为这个目标补充一个近期里程碑' : '先建立并确认一个目标计划',
+    title: historicalContractMissing
+      ? '补录该周适用的目标标准版本'
+      : goal ? '为这个目标补充一个近期里程碑' : '先建立并确认一个目标计划',
     rationale: goal
-      ? `目标「${goal.title ?? '未命名目标'}」尚无可用于复盘的里程碑，当前记录不能支持目标级的进展判断。`
+      ? historicalContractMissing
+        ? `目标「${goal.title ?? '未命名目标'}」在该复盘周没有已生效的契约版本；不能用之后的目标标准改写这段历史评价。`
+        : `目标「${goal.title ?? '未命名目标'}」尚无可用于复盘的里程碑，当前记录不能支持目标级的进展判断。`
       : '本周没有活跃目标，无法把行动、证据或结果归到明确的目标和里程碑。',
     expectedResult: goal
-      ? '确认一个近期里程碑、可观察标准和至少一项关联行动，以便下周按目标核对执行与证据。'
+      ? historicalContractMissing
+        ? '如能核实当时标准，请补录带有正确生效时间的目标契约；无法核实时保留为未评估，不套用当前标准。'
+        : '确认一个近期里程碑、可观察标准和至少一项关联行动，以便下周按目标核对执行与证据。'
       : '确认一个包含近期里程碑和可观察标准的目标计划，再开始收集对应行动与证据。',
     verificationDate: addDays(weekStart, 13),
     modifiedByUser: false,
   };
 }
 
-function makeAdjustment(weekStart: string, activeGoals: GoalPlan[], actions: GoalActionRelation[], evidence: Evidence[]): WeeklyReviewAdjustment {
+function makeAdjustment(weekStart: string, activeGoals: WeeklyReviewGoalPlan[], actions: GoalActionRelation[], evidence: Evidence[]): WeeklyReviewAdjustment {
   const candidates = activeGoals.flatMap(goal => {
     const milestones = goal.milestones.filter(milestone => milestone.stage === 'near');
     const selectedMilestones = milestones.length ? milestones : goal.milestones;
     return selectedMilestones.map(milestone => {
       const milestoneActions = actions.filter(action => action.goalPlanId === goal.id && action.milestoneId === milestone.id);
       const actionIds = new Set(milestoneActions.map(action => action.id));
-      const milestoneEvidence = evidence.filter(item => item.goalPlanId === goal.id && item.goalActionId != null && actionIds.has(item.goalActionId));
+      const effectiveAt = goal.reviewContractEffectiveAt ? Date.parse(goal.reviewContractEffectiveAt) : null;
+      const milestoneEvidence = evidence.filter(item => item.goalPlanId === goal.id && item.goalActionId != null && actionIds.has(item.goalActionId)
+        && (effectiveAt === null || Date.parse(item.observedAt) >= effectiveAt));
       const evidenceRequirement = evidenceRequirementFor(goal, milestone, milestoneActions);
       const threshold = parseLatencyTarget(milestone);
       const measured = latestCompleteMeasurement(milestoneEvidence, evidenceRequirement.level);
@@ -310,7 +353,8 @@ function makeAdjustment(weekStart: string, activeGoals: GoalPlan[], actions: Goa
     });
   });
   candidates.sort((a, b) => b.priority - a.priority);
-  return candidates[0]?.adjustment ?? makeSetupAdjustment(weekStart, activeGoals[0]);
+  const fallbackGoal = activeGoals[0];
+  return candidates[0]?.adjustment ?? makeSetupAdjustment(weekStart, fallbackGoal, fallbackGoal?.contractVersion === null);
 }
 
 function evidenceSnapshot(item: Evidence, goalTitle: string | null, goalActionTitle: string | null): WeeklyReviewEvidence {
@@ -322,11 +366,15 @@ function evidenceSnapshot(item: Evidence, goalTitle: string | null, goalActionTi
   };
 }
 
-function summarizeMilestone(goal: GoalPlan, milestone: GoalMilestone, actions: GoalActionRelation[], activities: HistoryCalendarActivity[], evidence: Evidence[]): WeeklyMilestoneReview {
+function summarizeMilestone(goal: WeeklyReviewGoalPlan, milestone: GoalMilestone, actions: GoalActionRelation[], activities: HistoryCalendarActivity[], evidence: Evidence[]): WeeklyMilestoneReview {
   const milestoneActions = actions.filter(action => action.milestoneId === milestone.id);
   const actionIds = new Set(milestoneActions.map(action => action.id));
   const completedIds = new Set(activities.filter(activity => activity.kind === 'action').map(activity => activity.id));
-  const linkedEvidence = evidence.filter(item => item.goalActionId != null && actionIds.has(item.goalActionId));
+  const effectiveAt = goal.reviewContractEffectiveAt ? Date.parse(goal.reviewContractEffectiveAt) : null;
+  const evidenceBeforeContract = effectiveAt === null ? [] : evidence.filter(item => item.goalActionId != null
+    && actionIds.has(item.goalActionId) && Date.parse(item.observedAt) < effectiveAt);
+  const linkedEvidence = evidence.filter(item => item.goalActionId != null && actionIds.has(item.goalActionId)
+    && (effectiveAt === null || Date.parse(item.observedAt) >= effectiveAt));
   const evidenceRequirement = evidenceRequirementFor(goal, milestone, milestoneActions);
   const qualifiedEvidence = linkedEvidence.filter(item => evidenceLevelRank[item.level] >= evidenceLevelRank[evidenceRequirement.level]);
   const measured = latestCompleteMeasurement(linkedEvidence, evidenceRequirement.level);
@@ -340,7 +388,7 @@ function summarizeMilestone(goal: GoalPlan, milestone: GoalMilestone, actions: G
   else if (milestoneActions.length) status = '本周没有完成关联行动';
   else status = '没有关联行动，无法追踪此里程碑';
 
-  const gap = !milestoneActions.length
+  const baseGap = !milestoneActions.length
     ? '没有关联行动，无法把本周执行或证据归到该里程碑。'
     : !qualifiedEvidence.length
       ? `缺少达到 ${evidenceRequirement.level} 门槛且关联到里程碑行动的结果证据。`
@@ -349,12 +397,16 @@ function summarizeMilestone(goal: GoalPlan, milestone: GoalMilestone, actions: G
         : threshold && measured && status === '本周关联实测未达标'
           ? `实测 ${measured.latencyMs} ms，未满足${threshold.inclusive ? '不高于' : '低于'} ${threshold.limit} ms。`
           : '证据需要与成功标准一同核对。';
+  const gap = evidenceBeforeContract.length
+    ? `${baseGap}另有 ${evidenceBeforeContract.length} 条关联证据早于契约生效时间，不用于本版本判定。`
+    : baseGap;
   return {
     milestoneId: milestone.id, title: milestone.title ?? '未命名里程碑', successCriteria: milestone.successCriteria,
     evidenceRequirement: milestone.evidenceRequirement, requiredEvidenceLevel: evidenceRequirement.level,
     evidenceRequirementSource: evidenceRequirement.source, associatedActionCount: milestoneActions.length,
     completedActionCount: milestoneActions.filter(action => completedIds.has(action.id)).length,
-    evidenceCount: linkedEvidence.length, qualifiedEvidenceCount: qualifiedEvidence.length,
+    evidenceCount: linkedEvidence.length, evidenceBeforeContractCount: evidenceBeforeContract.length,
+    qualifiedEvidenceCount: qualifiedEvidence.length,
     evidenceIds: linkedEvidence.map(item => item.id), status, gap,
   };
 }
@@ -370,17 +422,27 @@ export function generateWeeklyReview(weekStart: string, timeZone = 'UTC'): Weekl
   const unplaced = plan?.unplaced ?? [];
   const allEvidence = listEvidence().filter(item => isWithinWeek(item.observedAt, weekStart, nextWeekStart, timeZone));
   const allPlans = listGoalPlans().filter(goal => goal.status !== 'draft');
+  const contractVersionByGoal = new Map(allPlans.map(goal => [goal.id,
+    contractVersionForReviewWeek(listGoalPlanContractVersions(goal.id), weekEnd, timeZone)]));
+  const reviewPlans: WeeklyReviewGoalPlan[] = allPlans.map(goal => {
+    const contractVersion = contractVersionByGoal.get(goal.id);
+    return contractVersion
+      ? { ...goal, ...contractVersion.plan, contractVersion: contractVersion.version, reviewContractEffectiveAt: contractVersion.effectiveAt }
+      : { ...goal, successDescription: null, milestones: [], evidenceRequirements: [], contractVersion: null, reviewContractEffectiveAt: null };
+  });
   const history = getHistoryCalendar(timeZone);
   const weekActivities = history.days.filter(day => day.date >= weekStart && day.date < nextWeekStart).flatMap(day => day.activities);
   const actionActivities = weekActivities.filter(activity => activity.kind === 'action');
   const evidenceTargetIds = new Set(allEvidence.flatMap(item => item.goalPlanId ? [item.goalPlanId] : []));
-  const activeGoalIds = new Set(allPlans.filter(goal => goal.status === 'active').map(goal => goal.id));
+  const activeGoalIds = new Set(reviewPlans.filter(goal => goal.status === 'active').map(goal => goal.id));
   const reportGoalIds = new Set([
     ...activeGoalIds, ...actionActivities.map(activity => activity.goalPlanId), ...evidenceTargetIds,
     ...planActions.map(entry => entry.action.goalPlanId),
   ]);
-  const goals = allPlans.filter(goal => reportGoalIds.has(goal.id));
+  const goals = reviewPlans.filter(goal => reportGoalIds.has(goal.id));
   const goalById = new Map(goals.map(goal => [goal.id, goal]));
+  const evaluationsByGoal = new Map(goals.map(goal => [goal.id,
+    listGoalPlanEvaluations(goal.id).filter(evaluation => isWithinWeek(evaluation.observedAt, weekStart, nextWeekStart, timeZone))]));
   const goalActions = listGoalActionRelations(goals.map(goal => goal.id));
   const actionById = new Map(goalActions.map(action => [action.id, action]));
   const evidenceForGoal = new Map<string, Evidence[]>();
@@ -430,12 +492,21 @@ export function generateWeeklyReview(weekStart: string, timeZone = 'UTC'): Weekl
       goalActionRecords, goalActivities, goalEvidence));
     return {
       goalPlanId: goal.id, title: goal.title ?? '未命名目标', status: goal.status,
+      contractVersion: contractVersionByGoal.get(goal.id)?.version ?? null,
+      contractEffectiveAt: contractVersionByGoal.get(goal.id)?.effectiveAt ?? null,
+      contractChangeSummary: contractVersionByGoal.get(goal.id)?.changeSummary ?? null,
       successDescription: goal.successDescription, completedAt: goal.completedAt,
       plannedActionCount: goalPlanActions.length,
       plannedMinutes: goalPlanActions.reduce((sum, entry) => sum + entry.action.estimateMinutes, 0),
       completedActionCount: goalActivities.length, evidenceCount: goalEvidence.length,
       qualifiedEvidenceCount: goalEvidence.filter(item => item.level === 'E2' || item.level === 'E3').length,
       milestones,
+      evaluations: (evaluationsByGoal.get(goal.id) ?? []).map(evaluation => ({
+        id: evaluation.id, observedAt: evaluation.observedAt, outcome: evaluation.outcome,
+        status: evaluation.status, summary: evaluation.summary, milestoneId: evaluation.milestoneId,
+        contractVersionId: evaluation.contractVersion.id, contractVersion: evaluation.contractVersion.version,
+        ruleSnapshot: evaluation.ruleSnapshot, evidenceIds: evaluation.evidenceIds,
+      })),
     };
   });
 
@@ -475,6 +546,7 @@ export function generateWeeklyReview(weekStart: string, timeZone = 'UTC'): Weekl
     `本周有 ${completedInWeek} 项目标行动的完成记录；系统不记录这些行动的实际耗时。`,
     ...weeklyGoals.map(goal => `目标「${goal.title}」（${goal.status}）：本周完成 ${goal.completedActionCount} 项行动，关联 ${goal.evidenceCount} 条证据，其中 E2/E3 有 ${goal.qualifiedEvidenceCount} 条。成功条件：${goal.successDescription ?? '尚未填写'}。`),
     ...weeklyGoals.flatMap(goal => goal.milestones.map(milestone => `里程碑「${milestone.title}」（目标：${goal.title}）：${milestone.status}；本周关联行动完成 ${milestone.completedActionCount}/${milestone.associatedActionCount}，E2/E3 证据 ${milestone.qualifiedEvidenceCount} 条。`)),
+    ...weeklyGoals.flatMap(goal => goal.evaluations.map(evaluation => `已保存目标进展评价「${goal.title}」：观察于 ${evaluation.observedAt}，按契约 v${evaluation.contractVersion} 的历史规则记录为 ${evaluation.outcome}（${evaluation.status}），摘要：${evaluation.summary}。`)),
     ...taskChanges.map(event => `目标任务变更记录：${event.summary}`),
     ...unlinkedEvidence.map(item => `未关联具体目标的证据「${item.reference}」未用于目标进展判定。`),
     ...goals.flatMap(goal => goal.lifecycleEvents.filter(event => isWithinWeek(event.createdAt, weekStart, nextWeekStart, timeZone))
