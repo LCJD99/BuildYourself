@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, GoalProject, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
 import type { Evidence } from '@/lib/model';
 import type { TaskChangeEvent } from '@/lib/milestone-store';
+import ProjectProgressPanel from './project-progress-panel';
 
 type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[]; projects: GoalProject[]; evidence: Evidence[] };
 type LifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
@@ -563,6 +564,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
           {goal.goalPlanId === project.primaryGoalPlanId ? '主要位置 · ' : '关联入口 · '}{goal.title} · {statusLabels[goal.status]}
         </span>)}</div>
       </div>
+      <ProjectProgressPanel key={project.id} project={project} actions={projectActions} />
       <div className="project-workspace-section">
         <div className="project-section-heading"><h3>共享任务 <span className="count">{projectActions.length}</span></h3>
           {createTaskPlan && <button type="button" className="secondary-button" onClick={() => beginTaskCreate(createTaskPlan.id, project.id)}>新增任务</button>}

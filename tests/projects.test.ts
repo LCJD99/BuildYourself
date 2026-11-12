@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { activateGoalPlan, createGoalPlanAction, createGoalProject, linkGoalProjectEvidence, linkGoalProjectMilestone, linkGoalProjectToGoal, listGoalPlanActions, listGoalProjects, saveGoalPlanDraft, updateGoalPlanAction } from '../lib/goal-plans';
 import { saveEvidence } from '../lib/store';
 import { correctEvidence } from '../lib/milestone-store';
+import { createProjectDeliverable, listProjectDeliverables, updateProjectDeliverable } from '../lib/project-deliverables';
+import { deriveProjectProgress } from '../lib/project-progress';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-projects-'));
 beforeEach(() => { process.env.BUILDYOURSELF_DB = join(dir, `${randomUUID()}.sqlite`); });
@@ -84,6 +86,44 @@ describe('共享项目', () => {
     expect(updated.evidence).toMatchObject([{ id: evidence.id, text: evidence.text }]);
     correctEvidence(evidence.id, { ...evidence, text: '更正后的验收材料。' });
     expect(listGoalProjects().find(item => item.id === project.id)?.evidence[0]).toMatchObject({ id: evidence.id, text: '更正后的验收材料。' });
+  });
+
+  it('项目固定交付清单持久化为进度分母，证据更正会刷新趋势与证据来源', () => {
+    const plan = activePlan('进展视图目标');
+    const project = createGoalProject({ title: '显式交付项目', goalPlanId: plan.id });
+    linkGoalProjectMilestone(project.id, { goalPlanId: plan.id, milestoneId: plan.milestones[0].id });
+    const initialAction = listGoalPlanActions(plan.id)[0];
+    updateGoalPlanAction(initialAction.id, { projectId: project.id });
+    const action = listGoalPlanActions(plan.id)[0];
+    const evidence = saveEvidence({
+      text: '一次完整基准观测', source: '基准测试', reference: 'run-before', observedAt: '2026-11-01T10:00:00.000Z',
+      links: ['milestone'], goalPlanId: plan.id, goalActionId: action.id, level: 'E2', reportSubmitted: null, latencyMs: 350, benchmarkComplete: true,
+    });
+    linkGoalProjectEvidence(project.id, evidence.id);
+
+    const [sourceDeliverable] = createProjectDeliverable(project.id, { title: '源代码' });
+    createProjectDeliverable(project.id, { title: '验收报告' });
+    expect(() => createProjectDeliverable(project.id, { title: '源代码' })).toThrow('同名交付物');
+    let linkedProject = listGoalProjects().find(item => item.id === project.id)!;
+    let model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id));
+    expect(model.deliverables).toMatchObject({ available: true, total: 2, completed: 0, percent: 0 });
+    expect(model.trend.observations).toEqual([expect.objectContaining({ id: evidence.id, value: 350 })]);
+    expect(model.trend.applicableRule).toBeNull();
+
+    updateProjectDeliverable(project.id, sourceDeliverable.id, { completed: true });
+    expect(listProjectDeliverables(project.id)).toHaveLength(2);
+    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id));
+    expect(model.deliverables).toMatchObject({ completed: 1, total: 2, percent: 50 });
+
+    correctEvidence(evidence.id, {
+      ...evidence, text: '修正后的观测', source: '修订基准', reference: 'run-corrected',
+      observedAt: '2026-11-04T10:00:00.000Z', level: 'E1', latencyMs: 299,
+    });
+    linkedProject = listGoalProjects().find(item => item.id === project.id)!;
+    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id));
+    expect(model.trend.observations).toEqual([expect.objectContaining({ id: evidence.id, value: 299, source: '修订基准', reference: 'run-corrected', level: 'E1', observedAt: '2026-11-04T10:00:00.000Z' })]);
+    expect(model.evidence.sources).toEqual(['修订基准']);
+    expect(model.milestones[0].evidenceIds).toEqual([evidence.id]);
   });
 
   it('迁移同名旧任务时按行创建独立项目，不跨目标按名称合并', () => {
