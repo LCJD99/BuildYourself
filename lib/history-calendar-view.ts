@@ -20,7 +20,7 @@ export function filterHistoryDay(day: HistoryCalendarDay | undefined, goalPlanId
           unlinkedEvidence: [],
         },
         followup: saved.followup?.goalPlanId === goalPlanId ? saved.followup : null,
-        corrections: saved.corrections.filter(correction => correction.before.goalPlanId === goalPlanId
+        corrections: saved.corrections.filter(correction => correction.before?.goalPlanId === goalPlanId
           || correction.citations.some(citation => citation.goalPlanId === goalPlanId)),
         latestEvaluations: saved.latestEvaluations.filter(evaluation => evaluation.goalPlanId === goalPlanId),
       }];

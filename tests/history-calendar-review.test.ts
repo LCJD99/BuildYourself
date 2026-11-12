@@ -203,4 +203,86 @@ describe('历史日历中的已保存复盘', () => {
       vi.useRealTimers();
     }
   });
+
+  it('检测复盘周外发生但被周内评价引用的证据更正', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-12T12:00:00.000Z'));
+    try {
+      const plan = saveGoalPlanDraft(completePlan());
+      activateGoalPlan(plan.id);
+      const action = listGoalPlanActions(plan.id)[0];
+      const evidence = saveEvidence({
+        text: '复盘周之前的评价证据', source: '导师', reference: 'older-review-evidence', observedAt: '2026-11-03T10:00:00.000Z',
+        links: ['milestone'], goalPlanId: plan.id, goalActionId: action.id, level: 'E2',
+        reportSubmitted: null, benchmarkComplete: null, latencyMs: null,
+      });
+      const evaluation = recordGoalPlanEvaluation(plan.id, {
+        outcome: 'not_met', summary: '周内评价引用了较早证据。', reasons: ['查看此前录音。'],
+        milestoneId: plan.milestones[0].id, evidenceIds: [evidence.id], observedAt: '2026-11-10T10:00:00.000Z',
+      });
+      const weekStart = '2026-11-09';
+      const draft = getWeeklyReview(weekStart, 'UTC');
+      expect(draft.review.evidence.map(item => item.id)).not.toContain(evidence.id);
+      const saved = saveWeeklyReview(weekStart, draft.review.adjustment, 'UTC');
+      vi.setSystemTime(new Date('2026-11-12T12:00:01.000Z'));
+      correctEvidence(evidence.id, { ...evidence, text: '更正后的较早证据' });
+
+      const response = await getHistoryCalendarRoute(new Request('http://localhost/api/history-calendar?timeZone=UTC'));
+      const history = await response.json() as HistoryCalendar;
+      const review = selectHistoryDay(history, saved.savedAt!.slice(0, 10), plan.id)!.reviews[0];
+      expect(review.review.goals.flatMap(goal => goal.evaluations)).toContainEqual(expect.objectContaining({ id: evaluation.id, evidenceIds: [evidence.id] }));
+      expect(review.corrections).toContainEqual(expect.objectContaining({
+        evidenceId: evidence.id,
+        citations: [expect.objectContaining({ kind: 'evaluation', evaluationId: evaluation.id })],
+        before: expect.objectContaining({ text: '复盘周之前的评价证据' }),
+        originalUnavailable: false,
+        current: expect.objectContaining({ text: '更正后的较早证据' }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('旧评价缺少证据快照时仍标记更正并说明原值不可恢复', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-12T12:00:00.000Z'));
+    try {
+      const plan = saveGoalPlanDraft(completePlan());
+      activateGoalPlan(plan.id);
+      const action = listGoalPlanActions(plan.id)[0];
+      const evidence = saveEvidence({
+        text: '没有可恢复快照的证据', source: '用户', reference: 'legacy-evidence', observedAt: '2026-11-03T10:00:00.000Z',
+        links: ['milestone'], goalPlanId: plan.id, goalActionId: action.id, level: 'E2',
+        reportSubmitted: null, benchmarkComplete: null, latencyMs: null,
+      });
+      const evaluation = recordGoalPlanEvaluation(plan.id, {
+        outcome: 'not_met', summary: '旧评价保留了证据引用 ID。', reasons: [],
+        milestoneId: plan.milestones[0].id, evidenceIds: [evidence.id], observedAt: '2026-11-10T10:00:00.000Z',
+      });
+      const database = openDatabase();
+      try {
+        database.prepare('UPDATE goal_plan_evaluations SET evidence_snapshots_json=? WHERE id=?').run('[]', evaluation.id);
+      } finally {
+        database.close();
+      }
+      const weekStart = '2026-11-09';
+      const draft = getWeeklyReview(weekStart, 'UTC');
+      const saved = saveWeeklyReview(weekStart, draft.review.adjustment, 'UTC');
+      vi.setSystemTime(new Date('2026-11-12T12:00:01.000Z'));
+      correctEvidence(evidence.id, { ...evidence, text: '旧证据更正后版本' });
+
+      const response = await getHistoryCalendarRoute(new Request('http://localhost/api/history-calendar?timeZone=UTC'));
+      const history = await response.json() as HistoryCalendar;
+      const review = selectHistoryDay(history, saved.savedAt!.slice(0, 10), plan.id)!.reviews[0];
+      expect(review.corrections).toContainEqual(expect.objectContaining({
+        evidenceId: evidence.id,
+        citations: [expect.objectContaining({ kind: 'evaluation', evaluationId: evaluation.id })],
+        before: null,
+        originalUnavailable: true,
+        current: expect.objectContaining({ text: '旧证据更正后版本' }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

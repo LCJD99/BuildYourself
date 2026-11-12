@@ -16,8 +16,10 @@ export function GET(request: Request) {
   const planById = new Map(plans.map(plan => [plan.id, plan]));
   const actionTitleById = new Map(listGoalPlanActions().map(action => [action.id, action.title]));
   const savedReviews = listSavedWeeklyReviews();
-  const latestEvaluationByGoal = new Map([...new Set(savedReviews.flatMap(saved => saved.review.goals.map(goal => goal.goalPlanId)))]
-    .map(goalPlanId => [goalPlanId, listGoalPlanEvaluations(goalPlanId).at(-1) ?? null]));
+  const evaluationsByGoal = new Map([...new Set(savedReviews.flatMap(saved => saved.review.goals.map(goal => goal.goalPlanId)))]
+    .map(goalPlanId => [goalPlanId, listGoalPlanEvaluations(goalPlanId)]));
+  const evaluationById = new Map([...evaluationsByGoal.values()].flatMap(evaluations => evaluations.map(evaluation => [evaluation.id, evaluation] as const)));
+  const latestEvaluationByGoal = new Map([...evaluationsByGoal].map(([goalPlanId, evaluations]) => [goalPlanId, evaluations.at(-1) ?? null]));
   for (const saved of savedReviews) {
     const { review, savedAt } = saved;
     if (!review.goals.length) continue;
@@ -31,12 +33,28 @@ export function GET(request: Request) {
       continue;
     }
     const citationsByEvidence = new Map<string, HistoryCalendarReview['corrections'][number]['citations']>();
+    const snapshotsByEvidence = new Map<string, HistoryCalendarReview['corrections'][number]['before']>(
+      review.evidence.map(snapshot => [snapshot.id, snapshot] as const),
+    );
     for (const goal of review.goals) {
       for (const evaluation of goal.evaluations) {
         for (const evidenceId of evaluation.evidenceIds) {
           const citations = citationsByEvidence.get(evidenceId) ?? [];
           citations.push({ goalPlanId: goal.goalPlanId, goalTitle: goal.title, kind: 'evaluation', evaluationId: evaluation.id, summary: evaluation.summary });
           citationsByEvidence.set(evidenceId, citations);
+        }
+        const persistedEvaluation = evaluationById.get(evaluation.id);
+        if (persistedEvaluation?.goalPlanId === goal.goalPlanId) {
+          const snapshotsById = new Map(persistedEvaluation.evidenceSnapshots.map(snapshot => [snapshot.id, snapshot]));
+          for (const evidenceId of evaluation.evidenceIds) {
+            const snapshot = snapshotsById.get(evidenceId);
+            if (snapshot && !snapshotsByEvidence.get(evidenceId)) snapshotsByEvidence.set(evidenceId, snapshot);
+            else if (!snapshotsByEvidence.has(evidenceId)) snapshotsByEvidence.set(evidenceId, null);
+          }
+        } else {
+          for (const evidenceId of evaluation.evidenceIds) {
+            if (!snapshotsByEvidence.has(evidenceId)) snapshotsByEvidence.set(evidenceId, null);
+          }
         }
       }
     }
@@ -54,21 +72,21 @@ export function GET(request: Request) {
         citationsByEvidence.set(evidence.id, citations);
       }
     }
-    const snapshotsByEvidence = new Map(review.evidence.map(snapshot => [snapshot.id, snapshot]));
     for (const trace of review.followups) {
-      for (const snapshot of trace.evidence) if (!snapshotsByEvidence.has(snapshot.id)) snapshotsByEvidence.set(snapshot.id, snapshot);
+      for (const snapshot of trace.evidence) if (!snapshotsByEvidence.get(snapshot.id)) snapshotsByEvidence.set(snapshot.id, snapshot);
     }
     const corrections: HistoryCalendarReview['corrections'] = [];
-    for (const snapshot of snapshotsByEvidence.values()) {
-      const current = evidenceById.get(snapshot.id);
+    for (const [evidenceId, snapshot] of snapshotsByEvidence) {
+      const current = evidenceById.get(evidenceId);
       const changedAt = current?.lastCorrectedAt;
       if (!current || !changedAt || Date.parse(changedAt) <= Date.parse(savedAt)) continue;
       const { revisionCount: _revisionCount, lastCorrectedAt: _lastCorrectedAt, revisions: _revisions, ...currentSnapshot } = current;
       corrections.push({
-        evidenceId: snapshot.id,
+        evidenceId,
         changedAt,
-        citations: citationsByEvidence.get(snapshot.id) ?? [],
+        citations: citationsByEvidence.get(evidenceId) ?? [],
         before: snapshot,
+        originalUnavailable: snapshot === null,
         current: currentSnapshot,
         currentGoalTitle: current.goalPlanId ? planById.get(current.goalPlanId)?.title ?? null : null,
         currentGoalActionTitle: current.goalActionId ? actionTitleById.get(current.goalActionId) ?? null : null,

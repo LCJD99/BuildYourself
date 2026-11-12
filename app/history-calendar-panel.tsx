@@ -124,6 +124,12 @@ export default function HistoryCalendarPanel() {
             {(selectedDay?.reviews.length ?? 0) > 0 && <div className="history-saved-reviews"><h4>已保存复盘</h4>{selectedDay!.reviews.map(saved => {
               const correctionById = new Map(saved.corrections.map(correction => [correction.evidenceId, correction]));
               const reviewEvidence = saved.review.evidence.filter(item => item.goalPlanId);
+              const visibleEvidenceIds = new Set([
+                ...reviewEvidence.map(item => item.id),
+                ...saved.review.followups.flatMap(trace => trace.evidence.map(item => item.id)),
+              ]);
+              const evaluationCitationCorrections = saved.corrections.filter(correction =>
+                !visibleEvidenceIds.has(correction.evidenceId) && correction.citations.some(citation => citation.kind === 'evaluation'));
               return <article className="history-saved-review" key={`${saved.review.weekStart}-${saved.savedAt}`}>
                 <strong>周复盘 · {saved.review.weekStart} 至 {saved.review.weekEnd}</strong>
                 <small>保存于 {new Date(saved.savedAt).toLocaleString('zh-CN')}。以下摘要和结论保留保存时的内容。</small>
@@ -148,6 +154,14 @@ export default function HistoryCalendarPanel() {
                     </div>;
                   })()}
                 </section>)}</div>
+                {evaluationCitationCorrections.length > 0 && <div className="history-review-evidence"><h5>复盘判定引用的周外证据更正</h5><ul>{evaluationCitationCorrections.map(correction => <li key={correction.evidenceId}>
+                  <strong>证据 {correction.evidenceId} 于 {new Date(correction.changedAt).toLocaleString('zh-CN')} 更正</strong>
+                  <span>{correction.citations.filter(citation => citation.kind === 'evaluation').map(citation => `${citation.goalTitle}：${citation.summary}`).join('；')}</span>
+                  {correction.originalUnavailable
+                    ? <small>保存时的评价引用了这条证据，但原复盘和评价都没有可恢复快照，原值不可用。</small>
+                    : correction.before && <small>评价保存时：{correction.before.text} · {correction.before.source} · {correction.before.reference} · {timeLabel(correction.before.observedAt)}</small>}
+                  <span>当前版本：{correction.current.text} · {correction.current.source} · {correction.current.reference} · {timeLabel(correction.current.observedAt)}</span>
+                </li>)}</ul></div>}
                 {reviewEvidence.length > 0 && <div className="history-review-evidence"><h5>复盘保存时的目标关联证据</h5><ul>{reviewEvidence.map(item => {
                   const correction = correctionById.get(item.id);
                   return <li key={item.id}>

@@ -1,6 +1,6 @@
 import { listGoalPlans, type GoalPlan, type GoalPlanAction, type GoalPlanStatus } from './goal-plans';
 import type { EvidenceSnapshot } from './model';
-import type { WeeklyReview, WeeklyReviewFollowup } from './weekly-review-store';
+import type { WeeklyReview, WeeklyReviewEvidence, WeeklyReviewFollowup } from './weekly-review-store';
 import { listEvidence, openDatabase } from './store';
 
 export type HistoryCalendarGoal = { id: string; title: string; status: GoalPlanStatus };
@@ -39,7 +39,8 @@ export type HistoryCalendarReviewCorrection = {
   evidenceId: string;
   changedAt: string;
   citations: HistoryCalendarReviewCitation[];
-  before: WeeklyReview['evidence'][number];
+  before: WeeklyReviewEvidence | EvidenceSnapshot | null;
+  originalUnavailable: boolean;
   current: EvidenceSnapshot;
   currentGoalTitle: string | null;
   currentGoalActionTitle: string | null;
