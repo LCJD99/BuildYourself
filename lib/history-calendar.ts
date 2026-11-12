@@ -1,4 +1,6 @@
 import { listGoalPlans, type GoalPlan, type GoalPlanAction, type GoalPlanStatus } from './goal-plans';
+import type { EvidenceSnapshot } from './model';
+import type { WeeklyReview, WeeklyReviewFollowup } from './weekly-review-store';
 import { listEvidence, openDatabase } from './store';
 
 export type HistoryCalendarGoal = { id: string; title: string; status: GoalPlanStatus };
@@ -24,17 +26,58 @@ export type HistoryCalendarEvidence = {
   reference: string;
   source: string;
 };
+export type HistoryCalendarReviewCitation = {
+  goalPlanId: string;
+  goalTitle: string;
+  kind: 'evaluation' | 'followup';
+  evaluationId?: string;
+  sourceWeekStart?: string;
+  actionId?: string | null;
+  summary: string;
+};
+export type HistoryCalendarReviewCorrection = {
+  evidenceId: string;
+  changedAt: string;
+  citations: HistoryCalendarReviewCitation[];
+  before: WeeklyReview['evidence'][number];
+  current: EvidenceSnapshot;
+  currentGoalTitle: string | null;
+  currentGoalActionTitle: string | null;
+};
+export type HistoryCalendarLatestEvaluation = {
+  goalPlanId: string;
+  evaluation: {
+    id: string;
+    observedAt: string;
+    evaluatedAt: string;
+    outcome: 'insufficient' | 'not_met' | 'met';
+    status: 'insufficient' | 'not_met' | 'pending_confirmation' | 'confirmed';
+    summary: string;
+    contractVersion: number;
+    evidenceIds: string[];
+  } | null;
+  staleEvidenceIds: string[];
+};
+export type HistoryCalendarReview = {
+  review: WeeklyReview;
+  savedAt: string;
+  followup: WeeklyReviewFollowup | null;
+  corrections: HistoryCalendarReviewCorrection[];
+  latestEvaluations: HistoryCalendarLatestEvaluation[];
+};
 export type HistoryCalendarDay = {
   date: string;
   activities: HistoryCalendarActivity[];
   evidence: HistoryCalendarEvidence[];
+  reviews: HistoryCalendarReview[];
 };
 export type UndatedHistoryActivity = { id: string; goalPlanId: string; goalTitle: string; title: string };
 export type UndatedHistoryEvidence = Omit<HistoryCalendarEvidence, 'observedAt'>;
-export type HistoryCalendar = { goals: HistoryCalendarGoal[]; days: HistoryCalendarDay[]; undatedActivities: UndatedHistoryActivity[]; undatedEvidence: UndatedHistoryEvidence[] };
+export type UndatedHistoryReview = { review: WeeklyReview; savedAt: string | null; followup: WeeklyReviewFollowup | null };
+export type HistoryCalendar = { goals: HistoryCalendarGoal[]; days: HistoryCalendarDay[]; undatedActivities: UndatedHistoryActivity[]; undatedEvidence: UndatedHistoryEvidence[]; undatedReviews: UndatedHistoryReview[] };
 type CompletedGoalAction = Pick<GoalPlanAction, 'id' | 'goalPlanId' | 'goalTitle' | 'title' | 'completedAt' | 'evidenceRequirement'>;
 
-function dateKey(timestamp: string, timeZone: string): string | null {
+export function historyCalendarDateKey(timestamp: string, timeZone: string): string | null {
   const time = Date.parse(timestamp);
   if (!Number.isFinite(time)) return null;
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(time);
@@ -48,7 +91,7 @@ function dateKey(timestamp: string, timeZone: string): string | null {
 function activityForCompletedAction(action: CompletedGoalAction, timeZone: string): HistoryCalendarActivity | null {
   const completedAt = action.completedAt;
   if (!completedAt) return null;
-  const date = dateKey(completedAt, timeZone);
+  const date = historyCalendarDateKey(completedAt, timeZone);
   if (!date) return null;
   return {
     id: action.id,
@@ -69,7 +112,7 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
   new Intl.DateTimeFormat('en', { timeZone }).format(new Date(0));
   const plans = historyPlans(listGoalPlans());
   const goals = plans.map(plan => ({ id: plan.id, title: plan.title ?? '未命名目标', status: plan.status }));
-  if (!plans.length) return { goals, days: [], undatedActivities: [], undatedEvidence: [] };
+  if (!plans.length) return { goals, days: [], undatedActivities: [], undatedEvidence: [], undatedReviews: [] };
 
   const database = openDatabase();
   let actions: CompletedGoalAction[];
@@ -103,14 +146,14 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
   const dayFor = (date: string) => {
     const existing = days.get(date);
     if (existing) return existing;
-    const day = { date, activities: [], evidence: [] };
+    const day: HistoryCalendarDay = { date, activities: [], evidence: [], reviews: [] };
     days.set(date, day);
     return day;
   };
 
   for (const action of actions) {
     const activity = activityForCompletedAction(action, timeZone);
-    if (activity) dayFor(dateKey(activity.completedAt, timeZone)!).activities.push(activity);
+    if (activity) dayFor(historyCalendarDateKey(activity.completedAt, timeZone)!).activities.push(activity);
     else undatedActivities.push({ id: action.id, goalPlanId: action.goalPlanId, goalTitle: action.goalTitle, title: action.title });
   }
 
@@ -130,13 +173,13 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
       reference: evidence.reference,
       source: evidence.source,
     };
-    const date = dateKey(record.observedAt, timeZone);
+    const date = historyCalendarDateKey(record.observedAt, timeZone);
     if (date) dayFor(date).evidence.push(record);
   }
 
   for (const plan of plans) {
     for (const event of plan.lifecycleEvents.filter(item => item.action === 'completion_confirmed')) {
-      const date = dateKey(event.createdAt, timeZone);
+      const date = historyCalendarDateKey(event.createdAt, timeZone);
       if (!date) continue;
       const day = dayFor(date);
       day.activities.push({
@@ -163,7 +206,7 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
           source: '目标完成核对',
         };
         const observedAt = evidence.observedAt;
-        const evidenceDate = observedAt ? dateKey(observedAt, timeZone) : null;
+        const evidenceDate = observedAt ? historyCalendarDateKey(observedAt, timeZone) : null;
         if (observedAt && evidenceDate) dayFor(evidenceDate).evidence.push({ ...record, observedAt });
         else undatedEvidence.push(record);
       }
@@ -174,6 +217,7 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
     goals,
     undatedActivities,
     undatedEvidence,
+    undatedReviews: [],
     days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)).map(day => ({
       ...day,
       activities: day.activities.sort((a, b) => a.completedAt.localeCompare(b.completedAt) || a.id.localeCompare(b.id)),

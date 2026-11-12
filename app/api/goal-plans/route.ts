@@ -1,4 +1,4 @@
-import { listGoalPlans, listGoalPlanActions, listPendingGoalActions, listTaskDecompositionProposals, listGoalProjects, saveGoalPlanDraft } from '@/lib/goal-plans';
+import { listGoalPlans, listGoalPlanActions, listGoalPlanEvaluations, listPendingGoalActions, listTaskDecompositionProposals, listGoalProjects, saveGoalPlanDraft } from '@/lib/goal-plans';
 import { listChangeEvents } from '@/lib/milestone-store';
 import { listEvidence } from '@/lib/store';
 
@@ -6,8 +6,24 @@ export const dynamic = 'force-dynamic';
 
 export function GET() {
   const changes = listChangeEvents().filter(event => event.eventType === 'task.created' || event.eventType === 'task.updated');
+  const plans = listGoalPlans();
+  const latestEvaluations = Object.fromEntries(plans.map(plan => {
+    const evaluation = listGoalPlanEvaluations(plan.id).at(-1);
+    return [plan.id, evaluation ? {
+      id: evaluation.id,
+      goalPlanId: evaluation.goalPlanId,
+      outcome: evaluation.outcome,
+      status: evaluation.status,
+      summary: evaluation.summary,
+      observedAt: evaluation.observedAt,
+      evaluatedAt: evaluation.evaluatedAt,
+      evidenceIds: evaluation.evidenceIds,
+      contractVersion: { version: evaluation.contractVersion.version },
+    } : null];
+  }));
   return Response.json({
-    plans: listGoalPlans(),
+    plans,
+    latestEvaluations,
     pendingActions: listPendingGoalActions(),
     actions: listGoalPlanActions(),
     taskProposals: listTaskDecompositionProposals(),

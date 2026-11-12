@@ -1,12 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, GoalProject, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
+import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEvaluation, GoalPlanEventAction, GoalPlanStatus, GoalProject, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
 import type { Evidence } from '@/lib/model';
 import type { TaskChangeEvent } from '@/lib/milestone-store';
 import ProjectProgressPanel from './project-progress-panel';
 
-type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[]; projects: GoalProject[]; evidence: Evidence[] };
+type GoalPlanEvaluationSummary = Pick<GoalPlanEvaluation, 'id' | 'goalPlanId' | 'outcome' | 'status' | 'summary' | 'observedAt' | 'evaluatedAt' | 'evidenceIds'> & { contractVersion: Pick<GoalPlanEvaluation['contractVersion'], 'version'> };
+type GoalPlansState = { plans: GoalPlan[]; latestEvaluations: Record<string, GoalPlanEvaluationSummary | null>; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[]; projects: GoalProject[]; evidence: Evidence[] };
 type LifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
 type TaskDraft = {
   title: string;
@@ -27,6 +28,12 @@ const eventLabels: Record<GoalPlanEventAction, string> = {
   completion_requested: '提交完成申请', completion_cancelled: '撤回完成申请', completion_confirmed: '确认完成',
   archived: '归档目标', abandoned: '放弃目标', imported: '迁移时记录已有状态',
   contract_changed: '更新目标契约', progress_confirmed: '确认进展评价',
+};
+const evaluationOutcomeLabels: Record<GoalPlanEvaluation['outcome'], string> = {
+  met: '达到标准', not_met: '未达到标准', insufficient: '证据不足',
+};
+const evaluationStatusLabels: Record<GoalPlanEvaluation['status'], string> = {
+  confirmed: '已确认', not_met: '未达标准', insufficient: '证据不足', pending_confirmation: '待确认',
 };
 
 function emptyTaskDraft(): TaskDraft {
@@ -59,7 +66,7 @@ function formatTaskChangeValue(value: unknown, actions: GoalPlanAction[]) {
 }
 
 export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { focusActionId?: string | null; selectedProjectId?: string | null }) {
-  const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [], actions: [], taskChanges: [], taskProposals: [], projects: [], evidence: [] });
+  const [state, setState] = useState<GoalPlansState>({ plans: [], latestEvaluations: {}, pendingActions: [], actions: [], taskChanges: [], taskProposals: [], projects: [], evidence: [] });
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [completionPlanId, setCompletionPlanId] = useState<string | null>(null);
@@ -252,6 +259,21 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
         ))}</ol>
       </details>
     );
+  }
+
+  function renderLatestEvaluation(plan: GoalPlan) {
+    const evaluation = state.latestEvaluations[plan.id];
+    const staleEvidence = evaluation?.evidenceIds.filter(id => state.evidence.some(evidence => evidence.id === id
+      && evidence.lastCorrectedAt && Date.parse(evidence.lastCorrectedAt) > Date.parse(evaluation.evaluatedAt))) ?? [];
+    return <section className="goal-subsection goal-latest-evaluation" id={`goal-latest-evaluation-${plan.id}`} aria-label={`${plan.title}最近保存的目标进展判定`}>
+      <h4>最近保存的目标进展判定</h4>
+      {evaluation ? <>
+        <p><strong>{evaluationOutcomeLabels[evaluation.outcome]} · {evaluationStatusLabels[evaluation.status]}</strong> · 契约 v{evaluation.contractVersion.version}</p>
+        <p>{evaluation.summary}</p>
+        <small>评价记录于 {formatDateTime(evaluation.evaluatedAt)}；观察时间 {formatDateTime(evaluation.observedAt)}。</small>
+        {staleEvidence.length > 0 && <small className="goal-evaluation-correction-warning">引用证据 {staleEvidence.length} 条在这次评价后更正。这里保留当时结论；请根据当前证据重新记录评价。</small>}
+      </> : <p className="goal-empty-inline">尚无已保存的目标进展判定。</p>}
+    </section>;
   }
 
   function beginTaskCreate(goalPlanId: string, projectId = '') {
@@ -723,6 +745,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
                 </div>
               ))}
             </div>
+            {renderLatestEvaluation(plan)}
             <div className="goal-subsection">
               <h4>共享项目入口</h4>
               {state.projects.filter(project => project.goals.some(goal => goal.goalPlanId === plan.id)).length ? <ul className="goal-evidence-requirements">
@@ -853,6 +876,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
               {plan.lifecycleReason && <p className="goal-lifecycle-reason">原因：{plan.lifecycleReason}</p>}
               {plan.status === 'completed' && plan.completedAt && <p className="goal-lifecycle-reason">完成时间：{new Date(plan.completedAt).toLocaleString()}</p>}
               {renderCompletion(plan)}
+              {renderLatestEvaluation(plan)}
               {renderHistory(plan)}
             </article>
           ))}

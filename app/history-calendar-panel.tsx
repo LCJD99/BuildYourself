@@ -6,6 +6,12 @@ import { selectHistoryDay } from '@/lib/history-calendar-view';
 
 const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
 const goalStatusLabels = { active: '活跃', completed: '已完成', paused: '已暂停', archived: '已归档', abandoned: '已放弃', draft: '草稿' };
+const evaluationOutcomeLabels = { met: '达到标准', not_met: '未达到标准', insufficient: '证据不足' };
+const evaluationStatusLabels = { confirmed: '已确认', pending_confirmation: '待确认', not_met: '未达标准', insufficient: '证据不足' };
+const reviewPlanStatusLabels = { confirmed: '已确认', draft: '草稿', missing: '未保存计划' };
+const plannedActionStatusLabels = { completed: '按计划日期完成', 'completed-earlier': '早于计划完成', 'completed-later': '晚于计划完成', pending: '待执行', overdue: '逾期未完成' };
+const adjustmentKindLabels = { measure: '测量', practice: '练习', setup: '设置' };
+const followupStatusLabels = { not_executed: '截至复盘时尚未执行', completed_no_evidence: '已完成但缺少关联证据', evidence_insufficient: '证据未达到门槛', result_available: '已有结果记录' };
 
 function localDateKey(year: number, month: number, day: number) {
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -62,6 +68,7 @@ export default function HistoryCalendarPanel() {
   const evidence = selectedDay?.evidence ?? [];
   const filteredUndated = (history?.undatedActivities ?? []).filter(activity => !selectedGoalId || activity.goalPlanId === selectedGoalId);
   const filteredUndatedEvidence = (history?.undatedEvidence ?? []).filter(evidence => !selectedGoalId || evidence.goalPlanId === selectedGoalId);
+  const filteredUndatedReviews = (history?.undatedReviews ?? []).filter(item => !selectedGoalId || item.review.goals.some(goal => goal.goalPlanId === selectedGoalId));
 
   function moveMonth(amount: number) {
     const next = new Date(month.year, month.month + amount, 1);
@@ -96,15 +103,16 @@ export default function HistoryCalendarPanel() {
             if (day === null) return <span className="history-calendar-blank" aria-hidden="true" key={`blank-${index}`} />;
             const date = localDateKey(month.year, month.month, day);
             const entries = entriesForDate(date);
-            const hasEntries = (entries?.activities.length ?? 0) > 0 || (entries?.evidence.length ?? 0) > 0;
-            return <button type="button" role="gridcell" aria-pressed={selectedDate === date} aria-label={`${date}${hasEntries ? `，${entries!.activities.length} 项活动，${entries!.evidence.length} 项证据` : ''}`} className={`history-calendar-day${selectedDate === date ? ' selected' : ''}${hasEntries ? ' has-entry' : ''}`} key={date} onClick={() => setSelectedDate(date)}>
-              <span>{day}</span>{hasEntries && <small>{entries!.activities.length + entries!.evidence.length} 条</small>}
+            const reviewCount = entries?.reviews.length ?? 0;
+            const hasEntries = (entries?.activities.length ?? 0) > 0 || (entries?.evidence.length ?? 0) > 0 || reviewCount > 0;
+            return <button type="button" role="gridcell" aria-pressed={selectedDate === date} aria-label={`${date}${hasEntries ? `，${entries!.activities.length} 项活动，${entries!.evidence.length} 项证据，${reviewCount} 份已保存复盘` : ''}`} className={`history-calendar-day${selectedDate === date ? ' selected' : ''}${hasEntries ? ' has-entry' : ''}`} key={date} onClick={() => setSelectedDate(date)}>
+              <span>{day}</span>{hasEntries && <small>{entries!.activities.length + entries!.evidence.length + reviewCount} 条</small>}
             </button>;
           })}
         </div>
         <section className="history-calendar-detail" aria-live="polite" aria-label="当天历史记录">
           <h3>{dayLabel(selectedDate)}</h3>
-          {activities.length || evidence.length ? <>
+          {activities.length || evidence.length || (selectedDay?.reviews.length ?? 0) > 0 ? <>
             {activities.length > 0 && <div><h4>已完成活动</h4><ul>{activities.map(activity => <li key={activity.id}>
               <strong>{activity.title}</strong><span>{activity.goalTitle} · {timeLabel(activity.completedAt)}</span>
               {activity.evidenceRequirement && <small>证据要求：{activity.evidenceRequirement}</small>}
@@ -113,11 +121,95 @@ export default function HistoryCalendarPanel() {
               <strong><span className={`history-evidence-level ${item.level}`}>{item.level}</span> {item.reference || item.requirement || '目标证据'}</strong>
               <span>{item.goalTitle}{item.actionTitle ? ` · ${item.actionTitle}` : ''} · {timeLabel(item.observedAt)}</span><small>{item.source} · {item.description}</small>
             </li>)}</ul></div>}
+            {(selectedDay?.reviews.length ?? 0) > 0 && <div className="history-saved-reviews"><h4>已保存复盘</h4>{selectedDay!.reviews.map(saved => {
+              const correctionById = new Map(saved.corrections.map(correction => [correction.evidenceId, correction]));
+              const reviewEvidence = saved.review.evidence.filter(item => item.goalPlanId);
+              return <article className="history-saved-review" key={`${saved.review.weekStart}-${saved.savedAt}`}>
+                <strong>周复盘 · {saved.review.weekStart} 至 {saved.review.weekEnd}</strong>
+                <small>保存于 {new Date(saved.savedAt).toLocaleString('zh-CN')}。以下摘要和结论保留保存时的内容。</small>
+                {saved.followup && <div className="history-followup-confirmation">
+                  <strong>建议追踪：{saved.followup.decision === 'accepted' ? '已接受' : '已修改并确认'} · {saved.followup.taskTitle}</strong>
+                  <span>{saved.followup.goalTitle} · {saved.followup.milestoneTitle} · 契约 v{saved.followup.contractVersion}</span>
+                  <small>原建议：{saved.followup.originalSuggestion.title} · 确认内容：{saved.followup.adjustment.title} · 状态：{saved.followup.state === 'confirmed' ? '已创建待排任务' : '任务创建中'}{saved.followup.actionId ? ` · 任务 ${saved.followup.actionId}` : ''}</small>
+                </div>}
+                {saved.review.facts.length > 0 && <div><h5>当时记录的事实</h5><ul>{saved.review.facts.map((fact, index) => <li key={`${index}-${fact}`}>{fact}</li>)}</ul></div>}
+                {saved.review.hypotheses.length > 0 && <div><h5>当时记录的待验证推断</h5><ul>{saved.review.hypotheses.map((fact, index) => <li key={`${index}-${fact}`}>{fact}</li>)}</ul></div>}
+                <div className="history-review-goals"><h5>保存时的目标判定</h5>{saved.review.goals.map(goal => <section key={goal.goalPlanId}>
+                  <strong>{goal.title}</strong>
+                  {goal.evaluations.length ? <ul>{goal.evaluations.map(evaluation => <li key={evaluation.id}>
+                    <span>{evaluationOutcomeLabels[evaluation.outcome]} · {evaluationStatusLabels[evaluation.status]}</span>
+                    <small>契约 v{evaluation.contractVersion} · {evaluation.summary} · 引用证据 {evaluation.evidenceIds.length} 条</small>
+                  </li>)}</ul> : <small>这份复盘没有保存目标进展判定。</small>}
+                  {saved.latestEvaluations.find(item => item.goalPlanId === goal.goalPlanId) && (() => {
+                    const latest = saved.latestEvaluations.find(item => item.goalPlanId === goal.goalPlanId)!;
+                    return <div className="history-latest-evaluation">
+                      {latest.evaluation ? <><strong>最近保存判定：{evaluationOutcomeLabels[latest.evaluation.outcome]}</strong><span>{latest.evaluation.summary}</span><small>契约 v{latest.evaluation.contractVersion} · 记录于 {new Date(latest.evaluation.evaluatedAt).toLocaleString('zh-CN')}{latest.staleEvidenceIds.length ? ' · 引用证据此后已更正，这条判定仍保留原结论' : ''}</small></> : <span>尚无已保存的目标进展判定。</span>}
+                      <a href={`#goal-latest-evaluation-${goal.goalPlanId}`}>打开目标最近判定</a>
+                    </div>;
+                  })()}
+                </section>)}</div>
+                {reviewEvidence.length > 0 && <div className="history-review-evidence"><h5>复盘保存时的目标关联证据</h5><ul>{reviewEvidence.map(item => {
+                  const correction = correctionById.get(item.id);
+                  return <li key={item.id}>
+                    <strong>{item.level} · {item.reference || '目标证据'}</strong>
+                    <span>{item.goalTitle}{item.goalActionTitle ? ` · ${item.goalActionTitle}` : ''} · {timeLabel(item.observedAt)}</span>
+                    <small>{item.source} · {item.text}</small>
+                    {correction && <div className="history-correction-note">
+                      <strong>此证据于 {new Date(correction.changedAt).toLocaleString('zh-CN')} 更正</strong>
+                      {correction.citations.some(citation => citation.kind === 'evaluation')
+                        ? <small>它被保存时的目标判定引用；历史结论保持不变。</small>
+                        : correction.citations.some(citation => citation.kind === 'followup')
+                          ? <small>它被保存时的建议追踪结果引用；历史追踪快照保持不变。</small>
+                        : <small>它出现在保存的证据清单中，但未被保存的目标判定明确引用。</small>}
+                      <span>当前版本：{correction.current.text}</span>
+                      <small>{correction.current.level} · {correction.current.source} · {correction.current.reference} · {timeLabel(correction.current.observedAt)} · {correction.currentGoalTitle ? `当前归属：${correction.currentGoalTitle}${correction.currentGoalActionTitle ? ` · ${correction.currentGoalActionTitle}` : ''}` : '当前未关联目标'}</small>
+                    </div>}
+                  </li>;
+                })}</ul></div>}
+                <details className="history-review-details">
+                  <summary>查看保存的完整复盘记录</summary>
+                  <p>计划状态：{reviewPlanStatusLabels[saved.review.executionEffort.planStatus]} · 已安排 {saved.review.executionEffort.plannedActionCount} 项 / {saved.review.executionEffort.plannedMinutes} 分钟估算 · 未排入 {saved.review.executionEffort.unplacedActionCount} 项 · 完成 {saved.review.executionEffort.completedActionCount} 项。实际工时：未记录。时区：{saved.review.timeZone}</p>
+                  {saved.review.plannedActions.length > 0 && <div><h5>当周计划行动</h5><ul>{saved.review.plannedActions.map(action => <li key={action.actionId}>
+                    <strong>{action.date} · {action.goalTitle}：{action.title}</strong>
+                    <small>计划 {action.estimateMinutes} 分钟 · {plannedActionStatusLabels[action.status]} · 完成时间：{action.completedAt ? new Date(action.completedAt).toLocaleString('zh-CN') : '未记录'} · 关联证据 {action.evidenceCount} 条（达到 E2/E3 的 {action.qualifiedEvidenceCount} 条）</small>
+                  </li>)}</ul></div>}
+                  {saved.review.goals.length > 0 && <div><h5>目标和里程碑快照</h5>{saved.review.goals.map(goal => <section key={goal.goalPlanId}>
+                    <strong>{goal.title} · {goalStatusLabels[goal.status]} · 契约 {goal.contractVersion === null ? '未适用' : `v${goal.contractVersion}`}</strong>
+                    <small>{goal.successDescription ?? '未保存成功描述'} · 契约生效：{goal.contractEffectiveAt ? new Date(goal.contractEffectiveAt).toLocaleString('zh-CN') : '未记录'} · 版本说明：{goal.contractChangeSummary ?? '无'} · 完成时间：{goal.completedAt ? new Date(goal.completedAt).toLocaleString('zh-CN') : '未记录'} · 完成行动 {goal.completedActionCount}/{goal.plannedActionCount} · 计划 {goal.plannedMinutes} 分钟 · 关联证据 {goal.evidenceCount} 条（达到 E2/E3 的 {goal.qualifiedEvidenceCount} 条）</small>
+                    {goal.milestones.length > 0 && <ul>{goal.milestones.map(milestone => <li key={milestone.milestoneId}>
+                      <strong>{milestone.title} · {milestone.status}</strong>
+                      <small>标准：{milestone.successCriteria ?? '未设置'} · 证据要求：{milestone.requiredEvidenceLevel}（{milestone.evidenceRequirementSource}）· 完成行动 {milestone.completedActionCount}/{milestone.associatedActionCount} · 关联证据 {milestone.evidenceCount} 条（达到门槛 {milestone.qualifiedEvidenceCount} 条，契约前 {milestone.evidenceBeforeContractCount} 条）· {milestone.gap}</small>
+                    </li>)}</ul>}
+                  </section>)}</div>}
+                  {saved.review.followups.length > 0 && <div><h5>此前复盘建议的追踪结果</h5><ul>{saved.review.followups.map(trace => <li key={`${trace.sourceWeekStart}-${trace.actionId}`}>
+                    <strong>{trace.sourceWeekStart} 周建议 · {trace.taskTitle} · {followupStatusLabels[trace.status]}</strong>
+                    <small>{trace.goalTitle} · {trace.milestoneTitle} · {trace.resultSummary}</small>
+                    {trace.evidence.map(item => {
+                      const correction = correctionById.get(item.id);
+                      return <div className="history-followup-evidence" key={item.id}>
+                        <span>{item.level} · {item.source} · {item.reference} · {item.text}</span>
+                        {correction && <small>此追踪证据之后已更正；保存时内容仍保留。当前版本：{correction.current.text}</small>}
+                      </div>;
+                    })}
+                  </li>)}</ul></div>}
+                  {saved.review.evidenceGaps.length > 0 && <div><h5>保存的证据缺口</h5><ul>{saved.review.evidenceGaps.map((gap, index) => <li key={`${index}-${gap}`}>{gap}</li>)}</ul></div>}
+                  {saved.review.deviations.length > 0 && <div><h5>保存的计划偏差</h5><ul>{saved.review.deviations.map((deviation, index) => <li key={`${index}-${deviation}`}>{deviation}</li>)}</ul></div>}
+                  <div className="history-review-adjustment"><h5>保存时的调整建议</h5>
+                    <strong>{adjustmentKindLabels[saved.review.adjustment.kind]} · {saved.review.adjustment.title}</strong>
+                    <span>{saved.review.adjustment.goalTitle}{saved.review.adjustment.milestoneTitle ? ` · ${saved.review.adjustment.milestoneTitle}` : ''}{saved.review.adjustment.actionTitle ? ` · ${saved.review.adjustment.actionTitle}` : ''}</span>
+                    <span>依据：{saved.review.adjustment.rationale}</span>
+                    <span>预期结果：{saved.review.adjustment.expectedResult}</span>
+                    <small>验证日期：{saved.review.adjustment.verificationDate}{saved.review.adjustment.modifiedByUser ? ' · 保存时由用户调整' : ''}</small>
+                  </div>
+                </details>
+              </article>;
+            })}</div>}
           </> : <p className="history-calendar-empty">这一天没有已记录的目标活动或证据。</p>}
         </section>
       </div>
       {filteredUndated.length > 0 && <div className="history-undated"><strong>日期不详的旧完成记录（{filteredUndated.length}）</strong><p>这些旧记录没有保存实际完成时间，因此不会放入具体日期。</p><ul>{filteredUndated.map(item => <li key={item.id}>{item.goalTitle} · {item.title}</li>)}</ul></div>}
       {filteredUndatedEvidence.length > 0 && <div className="history-undated"><strong>未记录实际发生时间的证据（{filteredUndatedEvidence.length}）</strong><p>这些证据仍关联到目标，但缺少 observedAt，因此不会标到某一天。</p><ul>{filteredUndatedEvidence.map(item => <li key={item.id}>{item.goalTitle}{item.actionTitle ? ` · ${item.actionTitle}` : ''} · {item.reference || item.requirement || item.description}</li>)}</ul></div>}
+      {filteredUndatedReviews.length > 0 && <div className="history-undated"><strong>无法定位日期的已保存复盘（{filteredUndatedReviews.length}）</strong><p>旧复盘缺少有效保存时间，因此不会猜测日期或放入某一天。</p><ul>{filteredUndatedReviews.map((item, index) => <li key={`${item.review.weekStart}-${index}`}>复盘周 {item.review.weekStart} 至 {item.review.weekEnd} · {item.savedAt || '未记录保存时间'}</li>)}</ul></div>}
       <p className="history-calendar-note">只显示明确关联到具体目标的活动和证据。未关联目标的通用证据仍可在证据区查看，不计入目标历史。</p>
       {history?.goals.length === 0 && <p className="history-calendar-empty">启用目标并记录完成行动后，这里会显示目标历史。</p>}
     </section>

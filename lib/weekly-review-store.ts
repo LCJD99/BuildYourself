@@ -824,6 +824,20 @@ export function getWeeklyReview(weekStart: string, timeZone = 'UTC'): WeeklyRevi
   }
 }
 
+export function listSavedWeeklyReviews(): WeeklyReviewRecord[] {
+  const database = ensureSchema();
+  try {
+    const rows = database.prepare("SELECT week_start FROM weekly_reviews WHERE status='saved' ORDER BY saved_at, week_start")
+      .all() as Array<{ week_start: string }>;
+    return rows.flatMap(row => {
+      const record = readRecord(database, row.week_start);
+      return record?.status === 'saved' ? [record] : [];
+    });
+  } finally {
+    database.close();
+  }
+}
+
 export function saveWeeklyReview(weekStart: string, adjustment: unknown, timeZone = 'UTC'): WeeklyReviewRecord {
   assertWeekStart(weekStart);
   const draft = getWeeklyReview(weekStart, timeZone);
