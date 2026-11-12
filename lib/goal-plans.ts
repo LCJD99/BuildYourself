@@ -98,10 +98,23 @@ export type GoalPlanAction = {
   milestoneCriteria: string | null;
   dependsOn: string[];
   status: 'pending_schedule' | 'scheduled' | 'done';
+  parentActionId: string | null;
+  decomposedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
 export type PendingGoalAction = GoalPlanAction & { status: 'pending_schedule' };
+
+export type ProposedGoalAction = GoalPlanActionInput & { id: string };
+export type TaskDecompositionProposal = {
+  id: string;
+  parentActionId: string;
+  goalPlanId: string;
+  status: 'pending_review' | 'accepted' | 'rejected';
+  tasks: ProposedGoalAction[];
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type GoalPlanActionInput = {
   title: string;
@@ -332,8 +345,21 @@ function ensureSchema() {
       status TEXT NOT NULL CHECK (status IN ('pending_schedule', 'scheduled', 'done')),
       priority TEXT NOT NULL DEFAULT 'medium',
       milestone_id TEXT,
+      parent_action_id TEXT,
+      decomposed_at TEXT,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS task_decomposition_proposals (
+      id TEXT PRIMARY KEY,
+      parent_action_id TEXT NOT NULL REFERENCES goal_plan_actions(id) ON DELETE CASCADE,
+      goal_plan_id TEXT NOT NULL REFERENCES goal_plans(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('pending_review', 'accepted', 'rejected')),
+      tasks_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS one_pending_decomposition_per_parent
+      ON task_decomposition_proposals(parent_action_id) WHERE status='pending_review';
     CREATE TABLE IF NOT EXISTS goal_plan_events (
       id TEXT PRIMARY KEY,
       goal_plan_id TEXT NOT NULL REFERENCES goal_plans(id) ON DELETE CASCADE,
@@ -361,6 +387,8 @@ function ensureSchema() {
   }
   const actionColumns = database.prepare('PRAGMA table_info(goal_plan_actions)').all() as { name: string }[];
   const existingColumns = new Set(actionColumns.map(column => column.name));
+  if (!existingColumns.has('parent_action_id')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN parent_action_id TEXT');
+  if (!existingColumns.has('decomposed_at')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN decomposed_at TEXT');
   if (!existingColumns.has('project_name')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN project_name TEXT');
   if (!existingColumns.has('deadline')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN deadline TEXT');
   if (!existingColumns.has('dependency_ids')) database.exec("ALTER TABLE goal_plan_actions ADD COLUMN dependency_ids TEXT NOT NULL DEFAULT '[]'");
@@ -519,6 +547,8 @@ function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
     successCriteria: row.success_criteria === null ? null : String(row.success_criteria),
     evidenceRequirement: row.evidence_requirement === null ? null : String(row.evidence_requirement),
     status: row.status === 'scheduled' || row.status === 'done' ? row.status : 'pending_schedule',
+    parentActionId: row.parent_action_id === null || row.parent_action_id === undefined ? null : String(row.parent_action_id),
+    decomposedAt: row.decomposed_at === null || row.decomposed_at === undefined ? null : String(row.decomposed_at),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at ?? row.created_at),
   };
@@ -526,7 +556,7 @@ function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
 
 const actionSelect = `SELECT a.id, a.goal_plan_id, a.title, a.details, a.project_name, a.deadline,
   a.estimate_minutes, a.dependency_ids, a.success_criteria, a.evidence_requirement, a.status,
-  a.priority, a.milestone_id, a.created_at, a.updated_at,
+  a.priority, a.milestone_id, a.parent_action_id, a.decomposed_at, a.created_at, a.updated_at,
   p.plan_json, json_extract(p.plan_json, '$.title') AS goal_title
   FROM goal_plan_actions a JOIN goal_plans p ON p.id=a.goal_plan_id`;
 
@@ -543,7 +573,7 @@ export function listGoalPlanActions(goalPlanId?: string): GoalPlanAction[] {
 }
 
 export function listPendingGoalActions(): PendingGoalAction[] {
-  return listGoalPlanActions().filter((action): action is PendingGoalAction => action.status === 'pending_schedule');
+  return listGoalPlanActions().filter((action): action is PendingGoalAction => action.status === 'pending_schedule' && !action.decomposedAt);
 }
 
 function normalizeActionDeadline(value: unknown): string | null {
@@ -585,6 +615,182 @@ function ensureActiveGoalPlan(database: DatabaseSync, goalPlanId: unknown): { id
     .get(goalPlanId) as { id: string } | undefined;
   if (!row) throw new Error('任务必须归属一个活跃目标');
   return { id: row.id };
+}
+
+function normalizeProposedActions(input: unknown): ProposedGoalAction[] {
+  if (!Array.isArray(input) || input.length < 2 || input.length > 20) throw new Error('拆分提议需要包含 2 到 20 项子任务');
+  const tasks = input.map((entry, index): ProposedGoalAction => {
+    const value = object(entry, `子任务 ${index + 1}`);
+    const normalized = normalizeGoalPlanActionInput(value);
+    if (normalized.estimateMinutes === null) throw new Error(`子任务「${normalized.title}」需要预计耗时`);
+    if (!normalized.successCriteria) throw new Error(`子任务「${normalized.title}」需要明确的完成标准`);
+    return { id: nullableText(value.id, '子任务 ID', 100) ?? randomUUID(), ...normalized };
+  });
+  const ids = new Set(tasks.map(task => task.id));
+  if (ids.size !== tasks.length) throw new Error('子任务 ID 不能重复');
+  const graph = new Map(tasks.map(task => [task.id, task.dependencyIds]));
+  for (const task of tasks) {
+    if (task.dependencyIds.some(id => id === task.id || !ids.has(id))) throw new Error(`子任务「${task.title}」只能依赖同一拆分提议中的其他子任务`);
+  }
+  const visited = new Set<string>();
+  const activePath = new Set<string>();
+  const hasCycle = (id: string): boolean => {
+    if (activePath.has(id)) return true;
+    if (visited.has(id)) return false;
+    activePath.add(id);
+    for (const dependencyId of graph.get(id) ?? []) if (hasCycle(dependencyId)) return true;
+    activePath.delete(id);
+    visited.add(id);
+    return false;
+  };
+  if ([...graph.keys()].some(hasCycle)) throw new Error('子任务依赖不能形成循环');
+  return tasks;
+}
+
+function proposalFromRow(row: Record<string, unknown>): TaskDecompositionProposal {
+  let tasks: ProposedGoalAction[] = [];
+  try {
+    const parsed: unknown = JSON.parse(String(row.tasks_json));
+    if (Array.isArray(parsed)) tasks = parsed as ProposedGoalAction[];
+  } catch {
+    tasks = [];
+  }
+  return {
+    id: String(row.id),
+    parentActionId: String(row.parent_action_id),
+    goalPlanId: String(row.goal_plan_id),
+    status: row.status === 'accepted' || row.status === 'rejected' ? row.status : 'pending_review',
+    tasks,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function getTaskDecompositionProposal(database: ReturnType<typeof openDatabase>, id: string) {
+  const row = database.prepare('SELECT * FROM task_decomposition_proposals WHERE id=?').get(id) as Record<string, unknown> | undefined;
+  return row ? proposalFromRow(row) : null;
+}
+
+export function listTaskDecompositionProposals(goalPlanId?: string): TaskDecompositionProposal[] {
+  const database = ensureSchema();
+  try {
+    const rows = goalPlanId
+      ? database.prepare('SELECT * FROM task_decomposition_proposals WHERE goal_plan_id=? ORDER BY created_at, id').all(goalPlanId)
+      : database.prepare('SELECT * FROM task_decomposition_proposals ORDER BY created_at, id').all();
+    return (rows as Array<Record<string, unknown>>).map(proposalFromRow);
+  } finally {
+    database.close();
+  }
+}
+
+export function createTaskDecompositionProposal(parentActionId: unknown, input: unknown): TaskDecompositionProposal {
+  if (typeof parentActionId !== 'string' || !parentActionId) throw new Error('请选择要拆分的父任务');
+  const value = object(input, '拆分提议');
+  const tasks = normalizeProposedActions(value.tasks);
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const parent = database.prepare(`${actionSelect} WHERE a.id=? AND p.status='active'`).get(parentActionId) as Record<string, unknown> | undefined;
+    if (!parent) throw new Error('父任务不存在或不属于活跃目标');
+    if (parent.status !== 'pending_schedule' || parent.decomposed_at) throw new Error('只能拆分尚未安排且尚未拆分的父任务');
+    if (database.prepare("SELECT 1 FROM task_decomposition_proposals WHERE parent_action_id=? AND status='pending_review'").get(parentActionId)) {
+      throw new Error('该父任务已有待核对的拆分提议');
+    }
+    const parentDeadline = parent.deadline === null ? null : String(parent.deadline);
+    if (parentDeadline && tasks.some(task => task.deadline && task.deadline > parentDeadline)) throw new Error('子任务截止日期不能晚于父任务截止日期');
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    database.prepare(`INSERT INTO task_decomposition_proposals
+      (id,parent_action_id,goal_plan_id,status,tasks_json,created_at,updated_at)
+      VALUES (?,?,?,'pending_review',?,?,?)`)
+      .run(id, parentActionId, String(parent.goal_plan_id), JSON.stringify(tasks), now, now);
+    database.exec('COMMIT');
+    inTransaction = false;
+    return getTaskDecompositionProposal(database, id)!;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export function resolveTaskDecompositionProposal(id: unknown, input: unknown): TaskDecompositionProposal {
+  if (typeof id !== 'string' || !id) throw new Error('请选择有效的拆分提议');
+  const value = object(input, '拆分提议操作');
+  const action = value.action;
+  if (action !== 'edit' && action !== 'confirm' && action !== 'reject') throw new Error('拆分提议操作无效');
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const proposal = getTaskDecompositionProposal(database, id);
+    if (!proposal) throw new Error('拆分提议不存在');
+    if (proposal.status !== 'pending_review') throw new Error('该拆分提议已处理');
+
+    const updatedAt = new Date().toISOString();
+    if (action === 'reject') {
+      database.prepare("UPDATE task_decomposition_proposals SET status='rejected', updated_at=? WHERE id=?").run(updatedAt, id);
+      database.exec('COMMIT');
+      inTransaction = false;
+      return getTaskDecompositionProposal(database, id)!;
+    }
+
+    if (action === 'edit') {
+      const tasks = normalizeProposedActions(value.tasks);
+      const parent = database.prepare(`SELECT a.deadline, a.status, a.decomposed_at, p.status AS goal_status
+        FROM goal_plan_actions a JOIN goal_plans p ON p.id=a.goal_plan_id WHERE a.id=?`)
+        .get(proposal.parentActionId) as { deadline: string | null; status: string; decomposed_at: string | null; goal_status: GoalPlanStatus } | undefined;
+      if (!parent || parent.status !== 'pending_schedule' || parent.decomposed_at || parent.goal_status !== 'active') throw new Error('父任务已变化，不能编辑这份拆分提议');
+      if (parent.deadline && tasks.some(task => task.deadline && task.deadline > parent.deadline!)) throw new Error('子任务截止日期不能晚于父任务截止日期');
+      database.prepare('UPDATE task_decomposition_proposals SET tasks_json=?, updated_at=? WHERE id=?')
+        .run(JSON.stringify(tasks), updatedAt, id);
+      database.exec('COMMIT');
+      inTransaction = false;
+      return getTaskDecompositionProposal(database, id)!;
+    }
+
+    if (proposal.tasks.length < 2) throw new Error('拆分提议内容无效，请先编辑并核对子任务。');
+    const parent = database.prepare(`${actionSelect} WHERE a.id=? AND p.status='active'`).get(proposal.parentActionId) as Record<string, unknown> | undefined;
+    if (!parent || parent.status !== 'pending_schedule' || parent.decomposed_at) throw new Error('父任务已变化，不能处理这份拆分提议');
+    const tasks = proposal.tasks;
+    const parentDeadline = parent.deadline === null ? null : String(parent.deadline);
+    if (parentDeadline && tasks.some(task => task.deadline && task.deadline > parentDeadline)) throw new Error('子任务截止日期不能晚于父任务截止日期');
+    const taskIds = new Map(tasks.map(task => [task.id, randomUUID()]));
+    const parentDependencies = JSON.parse(String(parent.dependency_ids)) as string[];
+    const insertTask = database.prepare(`INSERT INTO goal_plan_actions
+      (id,goal_plan_id,title,details,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,
+       status,priority,milestone_id,parent_action_id,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?,?,?,?)`);
+    for (const task of tasks) {
+      const dependencies = [...new Set([...parentDependencies, ...task.dependencyIds.map(dependencyId => taskIds.get(dependencyId)!)])];
+      const taskId = taskIds.get(task.id)!;
+      insertTask.run(taskId, proposal.goalPlanId, task.title, task.details, task.projectName ?? (parent.project_name === null ? null : String(parent.project_name)),
+        task.deadline ?? (parent.deadline === null ? null : String(parent.deadline)), task.estimateMinutes, JSON.stringify(dependencies), task.successCriteria,
+        task.evidenceRequirement, String(parent.priority), parent.milestone_id === null ? null : String(parent.milestone_id), proposal.parentActionId, updatedAt, updatedAt);
+      recordTaskChange(database, 'task.created', {
+        id: taskId, goalPlanId: proposal.goalPlanId, title: task.title,
+        projectName: task.projectName ?? (parent.project_name === null ? null : String(parent.project_name)),
+      }, ['任务名称', '预计耗时', '截止日期', '依赖', '完成标准'], updatedAt, []);
+    }
+    database.prepare('UPDATE goal_plan_actions SET decomposed_at=?, updated_at=? WHERE id=?').run(updatedAt, updatedAt, proposal.parentActionId);
+    recordTaskChange(database, 'task.updated', {
+      id: proposal.parentActionId, goalPlanId: proposal.goalPlanId, title: String(parent.title),
+      projectName: parent.project_name === null ? null : String(parent.project_name),
+    }, ['子任务拆分'], updatedAt, [{ field: '拆分状态', before: '未拆分', after: tasks.map(task => task.title) }]);
+    database.prepare("UPDATE task_decomposition_proposals SET status='accepted', updated_at=? WHERE id=?").run(updatedAt, id);
+    database.exec('COMMIT');
+    inTransaction = false;
+    return getTaskDecompositionProposal(database, id)!;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
 }
 
 function validateActionDependencies(database: DatabaseSync, goalPlanId: string, taskId: string, dependencyIds: string[]) {

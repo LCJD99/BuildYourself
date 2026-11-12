@@ -1,4 +1,4 @@
-import { listGoalPlans, listGoalPlanActions, listPendingGoalActions, saveGoalPlanDraft } from '@/lib/goal-plans';
+import { listGoalPlans, listGoalPlanActions, listPendingGoalActions, listTaskDecompositionProposals, saveGoalPlanDraft } from '@/lib/goal-plans';
 import { listChangeEvents } from '@/lib/milestone-store';
 
 export const dynamic = 'force-dynamic';
@@ -9,6 +9,7 @@ export function GET() {
     plans: listGoalPlans(),
     pendingActions: listPendingGoalActions(),
     actions: listGoalPlanActions(),
+    taskProposals: listTaskDecompositionProposals(),
     taskChanges: changes,
   });
 }

@@ -1,10 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, PendingGoalAction } from '@/lib/goal-plans';
+import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
 import type { TaskChangeEvent } from '@/lib/milestone-store';
 
-type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[] };
+type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[] };
 type LifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
 type TaskDraft = {
   title: string;
@@ -49,7 +49,7 @@ function formatTaskChangeValue(value: unknown, actions: GoalPlanAction[]) {
 }
 
 export default function GoalPlansPanel({ focusActionId }: { focusActionId?: string | null }) {
-  const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [], actions: [], taskChanges: [] });
+  const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [], actions: [], taskChanges: [], taskProposals: [] });
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [completionPlanId, setCompletionPlanId] = useState<string | null>(null);
@@ -58,6 +58,9 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [taskDraft, setTaskDraft] = useState<TaskDraft | null>(null);
   const [savingTask, setSavingTask] = useState(false);
+  const [editingProposalId, setEditingProposalId] = useState<string | null>(null);
+  const [proposalDraft, setProposalDraft] = useState<ProposedGoalAction[] | null>(null);
+  const [savingProposal, setSavingProposal] = useState(false);
   const lastScrolledFocus = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -298,6 +301,64 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
     }
   }
 
+  function beginProposalEdit(proposal: TaskDecompositionProposal) {
+    setEditingProposalId(proposal.id);
+    setProposalDraft(proposal.tasks.map(task => ({ ...task, dependencyIds: [...task.dependencyIds] })));
+    setError('');
+  }
+
+  function updateProposalTask(index: number, patch: Partial<ProposedGoalAction>) {
+    setProposalDraft(current => current ? current.map((task, taskIndex) => taskIndex === index ? { ...task, ...patch } : task) : current);
+  }
+
+  async function saveProposalEdit(event: FormEvent<HTMLFormElement>, proposalId: string) {
+    event.preventDefault();
+    if (!proposalDraft) return;
+    setSavingProposal(true);
+    try {
+      const response = await fetch(`/api/task-decompositions/${encodeURIComponent(proposalId)}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'edit', tasks: proposalDraft }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法保存拆分修改');
+      setEditingProposalId(null);
+      setProposalDraft(null);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法保存拆分修改');
+    } finally {
+      setSavingProposal(false);
+    }
+  }
+
+  async function resolveProposal(proposal: TaskDecompositionProposal, action: 'confirm' | 'reject') {
+    const parentTask = state.actions.find(task => task.id === proposal.parentActionId);
+    const taskSummary = proposal.tasks.map(task => {
+      const dependencies = task.dependencyIds.map(id => proposal.tasks.find(candidate => candidate.id === id)?.title ?? id).join('、') || '无';
+      const deadline = task.deadline ? formatDate(task.deadline) : `沿用父任务（${formatDate(parentTask?.deadline ?? null)}）`;
+      return `· ${task.title}（${task.estimateMinutes} 分钟，截止 ${deadline}，依赖 ${dependencies}）：${task.successCriteria}`;
+    }).join('\n');
+    const summary = action === 'confirm'
+      ? `确认后「${state.actions.find(task => task.id === proposal.parentActionId)?.title || '父任务'}」会退出待排池，子任务进入待排池：\n${taskSummary}`
+      : `拒绝后父任务保持原样，提议会记录为已拒绝：\n${taskSummary}`;
+    if (!window.confirm(`${action === 'confirm' ? '确认' : '拒绝'}这份拆分提议？\n\n${summary}`)) return;
+    setSavingProposal(true);
+    try {
+      const response = await fetch(`/api/task-decompositions/${encodeURIComponent(proposal.id)}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法处理拆分提议');
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法处理拆分提议');
+    } finally {
+      setSavingProposal(false);
+    }
+  }
+
   const active = state.plans.filter(plan => plan.status === 'active');
   const paused = state.plans.filter(plan => plan.status === 'paused');
   const ended = state.plans.filter(plan => ['completed', 'archived', 'abandoned'].includes(plan.status));
@@ -406,16 +467,18 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
             </div>
             <div className="goal-subsection">
               <div className="task-section-heading">
-                <h4>任务与待排池 <span className="count">{actions.length} 项 · {actions.filter(action => action.status === 'pending_schedule').length} 项待排</span></h4>
+                <h4>任务与待排池 <span className="count">{actions.length} 项 · {actions.filter(action => action.status === 'pending_schedule' && !action.decomposedAt).length} 项待排</span></h4>
                 <button type="button" className="secondary-button" onClick={() => beginTaskCreate(plan.id)}>新增任务</button>
               </div>
               {actions.length ? <div className="goal-task-list">{actions.map(action => (
                 <article className="goal-task-card" id={`goal-action-${action.id}`} key={action.id}>
                   <div className="goal-task-card-head">
-                    <div><span className={`goal-task-status ${action.status}`}>{action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
-                    <button type="button" className="edit-evidence-button" onClick={() => beginTaskEdit(action)}>编辑</button>
+                    <div><span className={`goal-task-status ${action.decomposedAt ? 'decomposed' : action.status}`}>{action.decomposedAt ? '已拆分' : action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
+                    <button type="button" className="edit-evidence-button" disabled={!!action.decomposedAt} onClick={() => beginTaskEdit(action)}>{action.decomposedAt ? '已拆分' : '编辑'}</button>
                   </div>
                   {action.details && <p className="goal-task-description">{action.details}</p>}
+                  {action.parentActionId && <p className="goal-task-description">子任务 · 父任务：{actions.find(parent => parent.id === action.parentActionId)?.title || '已拆分任务'}</p>}
+                  {action.decomposedAt && <p className="goal-task-description">已由确认的子任务替代，父任务本身不会进入日级计划。</p>}
                   <dl className="goal-task-details">
                     <dt>归属</dt><dd>{action.projectName ? `${plan.title} · ${action.projectName}` : plan.title}</dd>
                     <dt>截止日期</dt><dd>{formatDate(action.deadline)}</dd>
@@ -426,6 +489,52 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
                   </dl>
                 </article>
               ))}</div> : <p className="goal-empty-inline">当前没有任务。新增后可在待排池中查看和安排。</p>}
+
+              {state.taskProposals.filter(proposal => proposal.goalPlanId === plan.id && proposal.status === 'pending_review').map(proposal => (
+                <section className="task-proposal-review" key={proposal.id} aria-label="待核对的任务拆分提议">
+                  <div className="task-editor-heading"><strong>待核对的任务拆分</strong><span>父任务：{actions.find(action => action.id === proposal.parentActionId)?.title || '未知任务'}</span></div>
+                  <p>提议中的子任务尚未进入待排池。核对完成条件、耗时、截止和依赖后再确认。</p>
+                  {editingProposalId === proposal.id && proposalDraft ? (
+                    <form className="task-editor" onSubmit={event => void saveProposalEdit(event, proposal.id)}>
+                      {proposalDraft.map((task, index) => (
+                        <div className="task-proposal-item" key={task.id}>
+                          <strong>子任务 {index + 1}</strong>
+                          <div className="task-editor-grid">
+                            <label>任务名称<input required maxLength={240} value={task.title} onChange={event => updateProposalTask(index, { title: event.target.value })} /></label>
+                            <label>预计耗时（分钟）<input required type="number" min="1" max="10080" value={task.estimateMinutes ?? ''} onChange={event => updateProposalTask(index, { estimateMinutes: event.target.value === '' ? null : Number(event.target.value) })} /></label>
+                            <label>截止日期（可选）<input type="date" value={task.deadline ?? ''} onChange={event => updateProposalTask(index, { deadline: event.target.value || null })} /></label>
+                            <label className="task-editor-wide">任务说明<textarea rows={2} value={task.details ?? ''} onChange={event => updateProposalTask(index, { details: event.target.value })} /></label>
+                            <label className="task-editor-wide">完成标准<textarea required rows={2} value={task.successCriteria ?? ''} onChange={event => updateProposalTask(index, { successCriteria: event.target.value })} /></label>
+                          </div>
+                          <fieldset className="task-dependencies">
+                            <legend>依赖的子任务</legend>
+                            {proposalDraft.filter(candidate => candidate.id !== task.id).map(candidate => (
+                              <label key={candidate.id}><input type="checkbox" checked={task.dependencyIds.includes(candidate.id)} onChange={event => updateProposalTask(index, { dependencyIds: event.target.checked ? [...task.dependencyIds, candidate.id] : task.dependencyIds.filter(id => id !== candidate.id) })} />{candidate.title}</label>
+                            ))}
+                          </fieldset>
+                        </div>
+                      ))}
+                      <div className="task-editor-actions">
+                        <button type="button" className="secondary-button" disabled={savingProposal} onClick={() => { setEditingProposalId(null); setProposalDraft(null); }}>取消编辑</button>
+                        <button type="submit" className="primary-button" disabled={savingProposal}>{savingProposal ? '保存中…' : '保存修改'}</button>
+                      </div>
+                    </form>
+                  ) : (
+                    <ol className="task-proposal-list">{proposal.tasks.map(task => (
+                      <li key={task.id}>
+                        <strong>{task.title}</strong>
+                        <span>{task.estimateMinutes} 分钟 · 截止 {task.deadline ? formatDate(task.deadline) : `沿用父任务（${formatDate(actions.find(action => action.id === proposal.parentActionId)?.deadline ?? null)}）`} · 依赖 {task.dependencyIds.map(id => proposal.tasks.find(candidate => candidate.id === id)?.title ?? id).join('、') || '无'}</span>
+                        <p>{task.successCriteria}</p>
+                      </li>
+                    ))}</ol>
+                  )}
+                  {editingProposalId !== proposal.id && <div className="task-editor-actions">
+                    <button type="button" className="secondary-button" disabled={savingProposal} onClick={() => beginProposalEdit(proposal)}>编辑提议</button>
+                    <button type="button" className="secondary-button" disabled={savingProposal} onClick={() => void resolveProposal(proposal, 'reject')}>拒绝拆分</button>
+                    <button type="button" className="primary-button" disabled={savingProposal} onClick={() => void resolveProposal(proposal, 'confirm')}>确认并进入待排池</button>
+                  </div>}
+                </section>
+              ))}
 
               {editingHere && taskDraft && <form className="task-editor" onSubmit={event => void saveTask(event)}>
                 <div className="task-editor-heading"><strong>{editingTaskId ? '编辑任务' : '新增任务'}</strong><span>任务归属：{plan.title}</span></div>
@@ -440,7 +549,7 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
                 </div>
                 <fieldset className="task-dependencies">
                   <legend>前置任务（可选）</legend>
-                  {actions.filter(action => action.id !== editingTaskId).length ? actions.filter(action => action.id !== editingTaskId).map(action => (
+                  {actions.filter(action => action.id !== editingTaskId && !action.decomposedAt).length ? actions.filter(action => action.id !== editingTaskId && !action.decomposedAt).map(action => (
                     <label key={action.id}><input type="checkbox" checked={taskDraft.dependencyIds.includes(action.id)} onChange={event => updateTaskDraft({ dependencyIds: event.target.checked ? [...taskDraft.dependencyIds, action.id] : taskDraft.dependencyIds.filter(id => id !== action.id) })} />{action.title}</label>
                   )) : <span>该目标下还没有其他任务。</span>}
                 </fieldset>

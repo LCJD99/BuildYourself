@@ -1,6 +1,6 @@
 import { openDatabase } from './store';
 import { generateWeeklyPlan, type WeeklyPlan } from './daily-planner';
-import { listPendingGoalActions } from './goal-plans';
+import { listGoalPlanActions, listPendingGoalActions } from './goal-plans';
 
 export type DailyPlanRecord = {
   plan: WeeklyPlan | null;
@@ -73,6 +73,7 @@ export function generateAndSaveDailyPlan(weekStart: string, capacities: Record<s
 
 export function confirmDailyPlan(weekStart: string): DailyPlanRecord {
   assertWeekStart(weekStart);
+  listGoalPlanActions();
   const database = ensureSchema();
   let inTransaction = false;
   try {
@@ -93,6 +94,7 @@ export function confirmDailyPlan(weekStart: string): DailyPlanRecord {
     const scheduledIds = new Set(plan.days.flatMap(day => day.actions.map(action => action.actionId)));
     const markScheduled = database.prepare(`UPDATE goal_plan_actions SET status='scheduled'
       WHERE id=? AND status='pending_schedule'
+      AND decomposed_at IS NULL
       AND EXISTS (SELECT 1 FROM goal_plans WHERE goal_plans.id=goal_plan_actions.goal_plan_id AND goal_plans.status='active')`);
     for (const id of scheduledIds) {
       if (Number(markScheduled.run(id).changes) !== 1) throw new Error('待排行动已发生变化，请重新生成计划后再确认。');
