@@ -65,7 +65,11 @@ function TrendChart({ observations }: { observations: ProjectProgressObservation
   </>;
 }
 
-export default function ProjectProgressPanel({ project, actions }: { project: GoalProject; actions: GoalPlanAction[] }) {
+export default function ProjectProgressPanel({ project, actions, contractVersions }: {
+  project: GoalProject;
+  actions: GoalPlanAction[];
+  contractVersions: Array<{ goalPlanId: string; version: number | null }>;
+}) {
   const [deliverables, setDeliverables] = useState<ProjectDeliverable[]>([]);
   const [measurementSeries, setMeasurementSeries] = useState<ProjectMeasurementSeries[]>([]);
   const [deliverableTitle, setDeliverableTitle] = useState('');
@@ -212,10 +216,12 @@ export default function ProjectProgressPanel({ project, actions }: { project: Go
     {view === 'milestones' && <div className="project-progress-milestones">
       {model.milestones.length ? model.milestones.map(milestone => {
         const linkedEvidence = project.evidence.filter(item => milestone.evidenceIds.includes(item.id));
+        const contractVersion = contractVersions.find(item => item.goalPlanId === milestone.goalPlanId)?.version ?? null;
         return <article key={`${milestone.goalPlanId}:${milestone.id}`}>
-          <header><span>{milestone.goalTitle} · {milestone.stage === 'near' ? '近期' : '远期'}</span><strong>{milestone.title}</strong></header>
-          {milestone.successCriteria && <p><b>成功标准</b>：{milestone.successCriteria}</p>}
+          <header><span>{milestone.goalTitle} · {milestone.stage === 'near' ? '近期' : '远期'} · 当前契约 {contractVersion === null ? '版本未知' : `V${contractVersion}`}</span><strong>{milestone.title}</strong></header>
+          {milestone.successCriteria && <p><b>当前契约标准</b>：{milestone.successCriteria}</p>}
           {milestone.evidenceRequirement && <p><b>证据要求</b>：{milestone.evidenceRequirement}</p>}
+          <p className="project-progress-version-note">此处标准来自目标当前契约版本；本视图不会用它回判历史观测，也不显示历史版本评价。</p>
           <p className="project-progress-status">{milestone.evidenceStatus}</p>
           <p className="project-progress-gap">{milestone.gap}</p>
           {linkedEvidence.map(item => <div className="project-progress-linked-evidence" key={item.id}>
@@ -290,7 +296,7 @@ export default function ProjectProgressPanel({ project, actions }: { project: Go
       </form>
     </div>}
 
-    {view !== 'deliverables' && <p className="project-progress-rule-note">观测视图没有可适用的结构化项目判定规则，因此只展示观测值与证据等级，不自动判断达标。</p>}
+    {view !== 'deliverables' && <p className="project-progress-rule-note">观测视图只展示实际观测值和证据等级；不以当前或历史目标契约标准回判这些观测。</p>}
     {error && <p className="project-progress-error" role="alert">{error}</p>}
   </section>;
 }

@@ -564,7 +564,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
           {goal.goalPlanId === project.primaryGoalPlanId ? '主要位置 · ' : '关联入口 · '}{goal.title} · {statusLabels[goal.status]}
         </span>)}</div>
       </div>
-      <ProjectProgressPanel key={project.id} project={project} actions={projectActions} />
+      <ProjectProgressPanel key={project.id} project={project} actions={projectActions} contractVersions={projectPlans.map(plan => ({ goalPlanId: plan.id, version: plan.contractVersion }))} />
       <div className="project-workspace-section">
         <div className="project-section-heading"><h3>共享任务 <span className="count">{projectActions.length}</span></h3>
           {createTaskPlan && <button type="button" className="secondary-button" onClick={() => beginTaskCreate(createTaskPlan.id, project.id)}>新增任务</button>}

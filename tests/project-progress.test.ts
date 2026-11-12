@@ -95,6 +95,8 @@ describe('项目进展视图的数据语义', () => {
     expect(model.trend.unassignedObservations).toEqual([expect.objectContaining({ id: 'single-e1', value: 350 })]);
     expect(model.trend.series).toEqual([]);
     expect(model.trend.applicableRule).toBeNull();
+    expect(model.milestones[0].evidenceStatus).not.toContain('达标');
+    expect(model.milestones[0]).not.toHaveProperty('outcome');
   });
 
   it('即使字段相同，未明确分组的来源和条件也不跨记录比较', () => {
