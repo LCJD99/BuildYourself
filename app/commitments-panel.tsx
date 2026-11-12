@@ -5,7 +5,7 @@ import type { CommitmentField, ExternalCommitment } from '@/lib/commitments';
 import ReplanPanel from './replan-panel';
 import type { DailyPlanRecord } from '@/lib/daily-plan-store';
 
-type CommitmentState = { commitments: ExternalCommitment[] };
+type CommitmentState = { commitments: ExternalCommitment[]; goals: Array<{ id: string; title: string }> };
 
 const fieldLabels: Record<CommitmentField, string> = {
   deliverable: '交付物',
@@ -29,7 +29,7 @@ function uncertaintyLabel(field: CommitmentField, taskIndex: number | null) {
 }
 
 export default function CommitmentsPanel({ onPlanAccepted }: { onPlanAccepted: (record: DailyPlanRecord) => void }) {
-  const [state, setState] = useState<CommitmentState>({ commitments: [] });
+  const [state, setState] = useState<CommitmentState>({ commitments: [], goals: [] });
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
@@ -114,7 +114,7 @@ export default function CommitmentsPanel({ onPlanAccepted }: { onPlanAccepted: (
           ))}
         </div>
       ))}
-      <ReplanPanel onAccepted={onPlanAccepted} />
+      <ReplanPanel goals={state.goals} onAccepted={onPlanAccepted} />
     </section>
   );
 }

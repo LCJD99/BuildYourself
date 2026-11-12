@@ -13,22 +13,22 @@ const dir = mkdtempSync(join(tmpdir(), 'buildyourself-replanning-'));
 beforeEach(() => { process.env.BUILDYOURSELF_DB = join(dir, `${randomUUID()}.sqlite`); });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-function goal() {
+function goal(hardDeadline = '2026-11-12') {
   const draft = saveGoalPlanDraft({
     sourceIntent: '准备英语展示', title: '英语目标', domain: 'learning', successDescription: '完成展示', observableResult: '提交录音',
     baselineStatus: 'known', constraints: { status: 'confirmed', items: [] },
     milestones: [{ title: '完成展示', stage: 'near', successCriteria: '提交完整录音', standardAssessment: 'reasonable', evidenceAvailability: 'available', reviewNote: '可通过提交记录核实', evidenceRequirement: '提交记录' }],
-    nextActions: [{ id: 'practice', title: '练习口语', estimateMinutes: 60, hardDeadline: '2026-11-12', specificity: 'concrete' }],
+    nextActions: [{ id: 'practice', title: '练习口语', estimateMinutes: 60, hardDeadline, specificity: 'concrete' }],
     evidenceRequirements: [{ item: '录音', description: '保存录音', minimumLevel: 'E2' }], reviewCycleDays: 7,
   });
   activateGoalPlan(draft.id);
   return draft.id;
 }
 
-function commitment(goalPlanId: string) {
+function commitment(goalPlanId: string | null, tasks?: unknown) {
   return saveExternalCommitment({
     sourceText: '周三交大纲，周五交成果。', deliverable: '课程展示', deadline: null, goalPlanId,
-    tasks: [
+    tasks: tasks ?? [
       { title: '提交大纲', details: null, deadline: '2026-11-11', estimateMinutes: 30, dependencies: [], acceptanceCriteria: '提交一页大纲' },
       { title: '提交成果', details: null, deadline: '2026-11-13', estimateMinutes: 60, dependencies: ['提交大纲'], acceptanceCriteria: '提交完整录音' },
     ], uncertainFields: [],
@@ -106,7 +106,7 @@ describe('重排建议', () => {
     const zeroCapacity = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [`2026-11-${String(9 + index).padStart(2, '0')}`, 0]));
     const proposal = createReplanProposal({ weekStart: '2026-11-09', trigger: 'capacity_change', reason: '本周无法投入时间', capacities: zeroCapacity });
     expect(proposal.plan.unplaced.some(item => item.action.id === originalAction.id)).toBe(true);
-    decideReplanProposal(proposal.id, 'accept');
+    decideReplanProposal(proposal.id, 'accept', true);
     expect(listGoalPlanActions(goalPlanId).find(item => item.id === originalAction.id)?.status).toBe('pending_schedule');
   });
 
@@ -118,5 +118,33 @@ describe('重排建议', () => {
     const proposal = createReplanProposal({ weekStart: '2026-11-16', trigger: 'execution_deviation', reason: '本周发生重大执行偏差' });
     expect(proposal.plan.days.flatMap(day => day.actions).some(action => action.actionId === scheduledAction.id)).toBe(false);
     expect(proposal.plan.unplaced.some(item => item.action.id === scheduledAction.id)).toBe(false);
+  });
+
+  it('恢复日与硬截止冲突时保留杂项承诺、展示工作量缺口，并要求用户确认部分安排', () => {
+    const fitnessGoalId = goal('2026-11-09');
+    const savedCommitment = commitment(null, [
+      { title: '提交项目报告', details: null, deadline: '2026-11-09', estimateMinutes: 60, dependencies: [], acceptanceCriteria: '提交完整报告' },
+    ]);
+    const capacities = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [`2026-11-${String(9 + index).padStart(2, '0')}`, index === 0 ? 60 : 0]));
+    const proposal = createReplanProposal({
+      weekStart: '2026-11-09', trigger: 'new_commitment', reason: '项目报告和训练冲突', capacities,
+      recoveryConstraints: [{ goalPlanId: fitnessGoalId, date: '2026-11-09', reason: '训练后安排恢复日' }],
+    });
+
+    expect(proposal.plan.days[0].actions.map(action => action.actionId)).toEqual([`commitment/${savedCommitment.id}/0`]);
+    expect(proposal.plan.unplaced).toMatchObject([{
+      action: { title: '练习口语', hardDeadline: '2026-11-09' }, reason: expect.stringContaining('恢复约束'),
+    }]);
+    expect(proposal.deadlineGaps).toMatchObject([{ deadline: '2026-11-09', timeGapMinutes: 60, items: [{ title: '练习口语' }] }]);
+    expect(() => editReplanProposal(proposal.id, { [proposal.plan.unplaced[0].action.id]: '2026-11-09' })).toThrow('恢复约束日期');
+    expect(listExternalCommitments().find(item => item.id === savedCommitment.id)?.goalPlanId).toBeNull();
+    expect(() => decideReplanProposal(proposal.id, 'accept')).toThrow('明确确认未解决的硬截止');
+
+    const accepted = decideReplanProposal(proposal.id, 'accept', true);
+
+    expect(accepted.status).toBe('accepted');
+    expect(getDailyPlan('2026-11-09').plan?.recoveryConstraints).toMatchObject([{ goalPlanId: fitnessGoalId, date: '2026-11-09', reason: '训练后安排恢复日' }]);
+    expect(listExternalCommitments().find(item => item.id === savedCommitment.id)?.status).toBe('scheduled');
+    expect(listGoalPlanActions(fitnessGoalId).find(action => action.title === '练习口语')?.status).toBe('pending_schedule');
   });
 });

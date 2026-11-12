@@ -1,12 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { openDatabase } from './store';
 import { listExternalCommitments } from './commitments';
-import { listGoalPlanActions, listPendingGoalActions, type GoalPlanAction } from './goal-plans';
-import { generateWeeklyPlan, type PlannerAction, type WeeklyPlan } from './daily-planner';
+import { listGoalPlanActions, listGoalPlans, listPendingGoalActions, type GoalPlanAction } from './goal-plans';
+import { generateWeeklyPlan, type PlannerAction, type RecoveryConstraint, type WeeklyPlan } from './daily-planner';
 import { getDailyPlan } from './daily-plan-store';
 
 export type ReplanTrigger = 'new_commitment' | 'deadline_change' | 'scope_change' | 'capacity_change' | 'constraint_change' | 'infeasible' | 'execution_deviation';
 export type ReplanChange = { actionId: string; title: string; fromDate: string | null; toDate: string | null; reason: string };
+export type ReplanDeadlineGap = {
+  deadline: string;
+  timeGapMinutes: number;
+  items: Array<{ actionId: string; title: string; minutes: number; reason: string }>;
+};
 export type ReplanProposal = {
   id: string;
   weekStart: string;
@@ -15,6 +20,7 @@ export type ReplanProposal = {
   triggerReason: string;
   previousPlan: WeeklyPlan;
   plan: WeeklyPlan;
+  deadlineGaps: ReplanDeadlineGap[];
   changes: ReplanChange[];
   status: 'draft' | 'accepted' | 'rejected';
   createdAt: string;
@@ -66,10 +72,21 @@ function sourceState(database: ReturnType<typeof openDatabase>) {
 }
 
 function fromRow(row: Record<string, unknown>): ReplanProposal {
+  const plan = JSON.parse(String(row.plan_json)) as WeeklyPlan;
+  const unplaced = Array.isArray(plan.unplaced) ? plan.unplaced : [];
+  const gaps = new Map<string, ReplanDeadlineGap>();
+  for (const entry of unplaced) {
+    if (!entry.action.hardDeadline) continue;
+    const gap = gaps.get(entry.action.hardDeadline) ?? { deadline: entry.action.hardDeadline, timeGapMinutes: 0, items: [] };
+    const minutes = entry.action.estimateMinutes ?? 30;
+    gap.timeGapMinutes += minutes;
+    gap.items.push({ actionId: entry.action.id, title: entry.action.title, minutes, reason: entry.reason });
+    gaps.set(entry.action.hardDeadline, gap);
+  }
   return {
     id: String(row.id), weekStart: String(row.week_start), version: Number(row.version), trigger: String(row.trigger) as ReplanTrigger,
     triggerReason: String(row.trigger_reason), previousPlan: JSON.parse(String(row.previous_plan_json)) as WeeklyPlan,
-    plan: JSON.parse(String(row.plan_json)) as WeeklyPlan, changes: JSON.parse(String(row.changes_json)) as ReplanChange[],
+    plan, deadlineGaps: [...gaps.values()].sort((a, b) => a.deadline.localeCompare(b.deadline)), changes: JSON.parse(String(row.changes_json)) as ReplanChange[],
     status: String(row.status) as ReplanProposal['status'], createdAt: String(row.created_at),
     decidedAt: row.decided_at === null ? null : String(row.decided_at),
   };
@@ -156,7 +173,7 @@ export function listReplanProposals(weekStart: string): ReplanProposal[] {
   } finally { database.close(); }
 }
 
-export function createReplanProposal(input: { weekStart: unknown; trigger: unknown; reason: unknown; capacities?: unknown }): ReplanProposal {
+export function createReplanProposal(input: { weekStart: unknown; trigger: unknown; reason: unknown; capacities?: unknown; recoveryConstraints?: unknown }): ReplanProposal {
   assertWeekStart(input.weekStart);
   if (typeof input.trigger !== 'string' || !triggers.has(input.trigger as ReplanTrigger)) throw new Error('请选择重排触发原因。');
   if (typeof input.reason !== 'string' || !input.reason.trim() || input.reason.trim().length > 1000) throw new Error('请说明本次变化或安排问题（最多 1000 字）。');
@@ -173,6 +190,22 @@ export function createReplanProposal(input: { weekStart: unknown; trigger: unkno
   const currentCapacity = Object.fromEntries((current.plan?.days ?? []).map(day => [day.date, day.capacityMinutes]));
   const mergedCapacities = { ...currentCapacity, ...(capacities as Record<string, number>) };
   const pendingGoalActions = listPendingGoalActions();
+  const knownGoals = listGoalPlans();
+  const goalsById = new Map(knownGoals.map(goal => [goal.id, goal]));
+  const recoveryInput = input.recoveryConstraints === undefined ? (current.plan?.recoveryConstraints ?? []) : input.recoveryConstraints;
+  if (!Array.isArray(recoveryInput)) throw new Error('恢复约束格式无效。');
+  const recoveryConstraints: RecoveryConstraint[] = recoveryInput.map((candidate: unknown) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('恢复约束格式无效。');
+    const item = candidate as Record<string, unknown>;
+    if (typeof item.goalPlanId !== 'string' || typeof item.date !== 'string' || typeof item.reason !== 'string'
+      || !item.goalPlanId.trim() || !item.reason.trim() || item.reason.trim().length > 500) throw new Error('恢复约束必须包含目标、原因和日期（原因最多 500 字）。');
+    const goal = goalsById.get(item.goalPlanId);
+    if (!goal) throw new Error('恢复约束必须关联已存在的目标。');
+    return { goalPlanId: goal.id, goalTitle: goal.title || '未命名目标', date: item.date, reason: item.reason.trim() };
+  });
+  if (new Set(recoveryConstraints.map(item => `${item.goalPlanId}:${item.date}`)).size !== recoveryConstraints.length) {
+    throw new Error('同一目标同一天不能重复设置恢复约束。');
+  }
   const authoritativeGoalActions = listGoalPlanActions().filter(action => action.status !== 'done');
   const goalActionsById = new Map(authoritativeGoalActions.map(action => [action.id, plannerAction(action)]));
   const previousPlan = current.plan ?? generateWeeklyPlan({ weekStart: input.weekStart, actions: pendingGoalActions, capacities: mergedCapacities });
@@ -193,7 +226,7 @@ export function createReplanProposal(input: { weekStart: unknown; trigger: unkno
 
   const preferredDates: Record<string, string> = Object.fromEntries(beforeEntries.filter(entry => entry.date).map(entry => [entry.action.id, entry.date!]));
   for (const action of commitments) if (action.hardDeadline) preferredDates[action.id] = action.hardDeadline;
-  const plan = generateWeeklyPlan({ weekStart: input.weekStart, actions: [...actionsById.values()], capacities: mergedCapacities, preferredDates });
+  const plan = generateWeeklyPlan({ weekStart: input.weekStart, actions: [...actionsById.values()], capacities: mergedCapacities, preferredDates, recoveryConstraints });
   const changes = findChanges(previousPlan, plan, trigger);
   const now = new Date().toISOString();
   const database = ensureSchema();
@@ -227,6 +260,9 @@ export function editReplanProposal(id: string, placements: unknown): ReplanPropo
     if (!entry) throw new Error('找不到要编辑的行动。');
     if (date !== null && (typeof date !== 'string' || !dayDates.has(date))) throw new Error('请选择本周内的日期，或选择尚未排入。');
     entry.date = date as string | null;
+    if (typeof date === 'string' && proposal.plan.recoveryConstraints?.some(constraint => constraint.goalPlanId === entry.action.goalPlanId && constraint.date === date)) {
+      throw new Error(`「${entry.action.title}」不能安排在 ${date} 的恢复约束日期。`);
+    }
     if (date === null) entry.unplacedReason = '用户编辑后暂未安排。';
   }
   const days = proposal.plan.days.map(day => ({ ...day, actions: [] as typeof day.actions, usedMinutes: 0 }));
@@ -265,7 +301,7 @@ export function getReplanProposal(id: string): ReplanProposal {
   try { return readProposal(database, id); } finally { database.close(); }
 }
 
-export function decideReplanProposal(id: string, decision: unknown): ReplanProposal {
+export function decideReplanProposal(id: string, decision: unknown, acknowledgeTradeoffs = false): ReplanProposal {
   if (decision !== 'accept' && decision !== 'reject') throw new Error('请选择接受或拒绝这份建议。');
   const proposal = getReplanProposal(id);
   if (proposal.status !== 'draft') return proposal;
@@ -286,6 +322,10 @@ export function decideReplanProposal(id: string, decision: unknown): ReplanPropo
         throw new Error('原计划、目标或承诺已发生变化，请重新生成重排建议。');
       }
       const plan = JSON.parse(row.plan_json) as WeeklyPlan;
+      const hasUnplacedHardDeadlines = plan.unplaced.some(item => Boolean(item.action.hardDeadline));
+      if (hasUnplacedHardDeadlines && acknowledgeTradeoffs !== true) {
+        throw new Error('计划仍有未解决的硬截止事项，请明确确认未解决的硬截止后再接受部分安排。');
+      }
       database.exec(`CREATE TABLE IF NOT EXISTS weekly_plans (
         week_start TEXT PRIMARY KEY, plan_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('draft', 'confirmed')), confirmed_at TEXT, updated_at TEXT NOT NULL

@@ -76,6 +76,22 @@ describe('日级计划生成', () => {
     expect(normal.days[0].actions[0]).toMatchObject({ estimateMinutes: 30, estimateIsDefault: true });
   });
 
+  it('按明确的目标恢复日阻止该目标训练，同时保留杂项硬截止任务', () => {
+    const plan = generateWeeklyPlan({
+      weekStart: '2026-11-09',
+      capacities: { '2026-11-09': 120 },
+      recoveryConstraints: [{ goalPlanId: 'fitness-goal', goalTitle: '长期健身', date: '2026-11-09', reason: '训练后安排恢复日' }],
+      actions: [
+        action({ id: 'training', goalPlanId: 'fitness-goal', goalTitle: '长期健身', title: '力量训练', hardDeadline: '2026-11-09', estimateMinutes: 60 }),
+        action({ id: 'misc:report', goalPlanId: 'misc:report', goalTitle: '杂项', title: '提交项目报告', hardDeadline: '2026-11-09', estimateMinutes: 60, priority: 'high' }),
+      ],
+    });
+
+    expect(plan.days[0].actions.map(item => item.actionId)).toEqual(['misc:report']);
+    expect(plan.unplaced).toMatchObject([{ action: { id: 'training', hardDeadline: '2026-11-09' }, reason: expect.stringContaining('恢复约束') }]);
+    expect(plan.recoveryConstraints).toEqual([{ goalPlanId: 'fitness-goal', goalTitle: '长期健身', date: '2026-11-09', reason: '训练后安排恢复日' }]);
+  });
+
   it('把未知依赖和循环依赖明确列为阻塞', () => {
     const plan = generateWeeklyPlan({
       weekStart: '2026-11-09',

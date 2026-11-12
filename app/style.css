@@ -86,6 +86,20 @@
 .replan-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
 .replan-actions button{padding:8px 10px;font-size:9px}
 .replan-edit-hint{display:block;margin-top:8px;color:#9b8350;font-size:9px}
+.replan-recovery-fields{display:grid;gap:8px;margin:0;padding:10px;border:1px solid #e8ede6;border-radius:7px;color:#748174;font-size:10px}
+.replan-recovery-fields legend{padding:0 4px;font-weight:600}
+.replan-recovery-fields p,.replan-recovery-fields small{margin:0;color:#879487;font-size:9px;line-height:1.6}
+.replan-recovery-fields label{display:grid;gap:5px}
+.replan-recovery-fields input,.replan-recovery-fields select{width:100%;min-height:32px;padding:6px 8px;border:1px solid #e1e7df;border-radius:5px;background:#fff;color:#536254;font:inherit}
+.replan-recovery-list,.replan-recovery-summary ul,.replan-deadline-gaps ul{display:grid;gap:5px;margin:0;padding-left:17px;color:#748174;font-size:9px;line-height:1.6}
+.replan-recovery-list li{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.replan-recovery-list button{border:0;background:none;color:#9b8350;font:inherit;cursor:pointer}
+.replan-recovery-summary,.replan-deadline-gaps{display:grid;gap:7px;margin-top:12px;padding:10px;border-radius:7px;background:#f7f8f4;color:#667466;font-size:10px}
+.replan-deadline-gaps{border:1px solid #e8d9ae;background:#fffaf0;color:#765e2c}
+.replan-deadline-gaps p{margin:0;font-size:9px;line-height:1.7}
+.replan-deadline-gaps>ul{padding-left:17px}
+.replan-tradeoff-confirm{display:flex;align-items:flex-start;gap:7px;padding-top:6px;border-top:1px solid #efe4c9;font-size:9px;line-height:1.6;cursor:pointer}
+.replan-tradeoff-confirm input{margin:1px 0 0}
 @media(max-width:650px){.replan-panel{padding:13px}.replan-head{align-items:flex-start;flex-direction:column}.replan-task{grid-template-columns:minmax(0,1fr) 112px}.replan-actions button{flex:1}}
 .task-proposal-review{margin-top:14px;padding:14px;border:1px solid #d9e4d8;border-radius:8px;background:#f7faf6}.task-proposal-review>p{margin:8px 0;color:#839084;font-size:10px;line-height:1.6}.task-proposal-list{list-style:none;margin:8px 0;padding:0}.task-proposal-list li,.task-proposal-item{padding:10px 0;border-top:1px solid #e9eee7}.task-proposal-list li{display:grid;gap:4px}.task-proposal-list strong,.task-proposal-item>strong{color:#526555;font-size:11px}.task-proposal-list span,.task-proposal-list p{margin:0;color:#849184;font-size:10px;line-height:1.5}.task-proposal-review .task-editor{margin-top:9px}.goal-task-status.decomposed{background:#f0f1ed;color:#7f897d}
 

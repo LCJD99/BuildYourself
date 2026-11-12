@@ -16,8 +16,8 @@ export function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { weekStart?: unknown; trigger?: unknown; reason?: unknown; capacities?: unknown };
-    const proposal = createReplanProposal({ weekStart: body.weekStart, trigger: body.trigger, reason: body.reason, capacities: body.capacities });
+    const body = await request.json() as { weekStart?: unknown; trigger?: unknown; reason?: unknown; capacities?: unknown; recoveryConstraints?: unknown };
+    const proposal = createReplanProposal({ weekStart: body.weekStart, trigger: body.trigger, reason: body.reason, capacities: body.capacities, recoveryConstraints: body.recoveryConstraints });
     return Response.json({ proposal }, { status: 201 });
   } catch (error) { return errorResponse(error); }
 }
@@ -32,8 +32,8 @@ export async function PATCH(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    const body = await request.json() as { proposalId?: unknown; decision?: unknown };
+    const body = await request.json() as { proposalId?: unknown; decision?: unknown; acknowledgeTradeoffs?: unknown };
     if (typeof body.proposalId !== 'string') throw new Error('需要提供重排建议 ID。');
-    return Response.json({ proposal: decideReplanProposal(body.proposalId, body.decision) });
+    return Response.json({ proposal: decideReplanProposal(body.proposalId, body.decision, body.acknowledgeTradeoffs === true) });
   } catch (error) { return errorResponse(error); }
 }
