@@ -25,6 +25,7 @@ const eventLabels: Record<GoalPlanEventAction, string> = {
   created: '创建草稿', activated: '启用目标', paused: '暂停目标', resumed: '恢复目标',
   completion_requested: '提交完成申请', completion_cancelled: '撤回完成申请', completion_confirmed: '确认完成',
   archived: '归档目标', abandoned: '放弃目标', imported: '迁移时记录已有状态',
+  contract_changed: '更新目标契约', progress_confirmed: '确认进展评价',
 };
 
 function emptyTaskDraft(): TaskDraft {
@@ -691,7 +692,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
         return (
           <article className="goal-card active-goal" id={`goal-plan-${plan.id}`} key={plan.id}>
             <div className="goal-card-head">
-              <div><span className="goal-state active-state">活跃 · {plan.domain === 'learning' ? '学习目标' : plan.domain === 'fitness' ? '健身目标' : plan.domain === 'project' ? '项目目标' : '通用目标'}</span><h3>{plan.title}</h3></div>
+              <div><span className="goal-state active-state">活跃 · {plan.domain === 'learning' ? '学习目标' : plan.domain === 'fitness' ? '健身目标' : plan.domain === 'project' ? '项目目标' : '通用目标'} · 契约 v{plan.contractVersion ?? 1}</span><h3>{plan.title}</h3></div>
               <span className="goal-review">每 {plan.reviewCycleDays} 天复盘</span>
             </div>
             <div className="goal-lifecycle-actions">
@@ -839,7 +840,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
           {[...paused, ...ended].map(plan => (
             <article className="goal-card historical-goal" key={plan.id}>
               <div className="goal-card-head">
-                <div><span className={`goal-state ${plan.status === 'paused' ? 'paused-state' : 'ended-state'}`}>{statusLabels[plan.status]}</span><h3>{plan.title || '未命名目标'}</h3></div>
+                <div><span className={`goal-state ${plan.status === 'paused' ? 'paused-state' : 'ended-state'}`}>{statusLabels[plan.status]} · 契约 v{plan.contractVersion ?? 1}</span><h3>{plan.title || '未命名目标'}</h3></div>
                 {plan.status === 'paused' && <div className="goal-lifecycle-actions">
                   <button className="primary-button" disabled={busyId === plan.id} onClick={() => void postLifecycle(plan, 'resume')}>恢复目标</button>
                   <button className="secondary-button" disabled={busyId === plan.id || !!plan.pendingCompletion} onClick={() => beginCompletionRequest(plan)}>申请完成</button>

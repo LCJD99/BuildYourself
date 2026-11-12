@@ -87,4 +87,35 @@ describe('里程碑核对', () => {
     expect(result.gap).toContain('E2 或 E3');
     expect(result.canConfirm).toBe(false);
   });
+
+  it('定性里程碑使用契约指定的最低证据等级', () => {
+    const result = qualitativeMilestoneReview({
+      standard: '提交一次书面反思',
+      summary: '调用方认为已完成书面反思。',
+      reasons: [],
+      evidence: [{ ...evidence, level: 'E1' }],
+      outcome: 'met',
+      confirmationRequired: true,
+      confirmation: null,
+      minimumEvidenceLevel: 'E1',
+    });
+
+    expect(result.status).toBe('达到标准，待确认');
+    expect(result.canConfirm).toBe(true);
+  });
+
+  it('未达标结论也须用户核对，不把 Agent 总结当作系统判定', () => {
+    const result = qualitativeMilestoneReview({
+      standard: '完成一次英语演示',
+      summary: '调用方认为仍未完成问答部分。',
+      reasons: ['当前录像没有问答。'],
+      evidence: [evidence],
+      outcome: 'not-met',
+      confirmationRequired: true,
+      confirmation: null,
+    });
+
+    expect(result.status).toBe('未满足标准，待确认');
+    expect(result.canConfirm).toBe(true);
+  });
 });

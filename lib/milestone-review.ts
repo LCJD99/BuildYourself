@@ -1,4 +1,4 @@
-import type { Evidence, Result } from './model';
+import type { Evidence, EvidenceLevel, Result } from './model';
 
 export type MilestoneConfirmation = {
   nodeId: 'milestone';
@@ -114,6 +114,7 @@ export function qualitativeMilestoneReview(input: {
   outcome: QualitativeOutcome;
   confirmationRequired: boolean;
   confirmation: MilestoneConfirmation | null;
+  minimumEvidenceLevel?: EvidenceLevel;
 }): MilestoneReview {
   const { standard: qualitativeStandard, summary, reasons, evidence, outcome, confirmationRequired, confirmation } = input;
   const currentEvidenceIds = new Set(evidence.map(item => item.id));
@@ -121,14 +122,17 @@ export function qualitativeMilestoneReview(input: {
     && confirmation.evidenceIds.length === currentEvidenceIds.size
     && confirmation.evidenceIds.every(id => currentEvidenceIds.has(id));
   const confirmedAt = sameEvidenceSnapshot ? confirmation.confirmedAt : null;
-  const hasQualifiedEvidence = evidence.some(item => item.level === 'E2' || item.level === 'E3');
+  const minimumEvidenceLevel = input.minimumEvidenceLevel ?? 'E2';
+  const evidenceRanks: Record<EvidenceLevel, number> = { E1: 1, E2: 2, E3: 3 };
+  const hasQualifiedEvidence = evidence.some(item => evidenceRanks[item.level] >= evidenceRanks[minimumEvidenceLevel]);
   const effectiveOutcome: QualitativeOutcome = hasQualifiedEvidence ? outcome : 'insufficient';
-  const confirmed = effectiveOutcome === 'met' && confirmationRequired && Boolean(confirmedAt);
-  const pending = effectiveOutcome === 'met' && confirmationRequired && !confirmed;
+  const confirmed = effectiveOutcome !== 'insufficient' && confirmationRequired && Boolean(confirmedAt);
+  const pending = effectiveOutcome !== 'insufficient' && confirmationRequired && !confirmed;
   let status: string;
   if (effectiveOutcome === 'insufficient') status = '证据不足';
+  else if (pending) status = effectiveOutcome === 'not-met' ? '未满足标准，待确认' : '达到标准，待确认';
+  else if (confirmed) status = effectiveOutcome === 'not-met' ? '已确认未达标' : '已确认达成';
   else if (effectiveOutcome === 'not-met') status = '未满足标准';
-  else if (pending) status = '达到标准，待确认';
   else if (confirmationRequired) status = '已确认达成';
   else status = '达到标准';
   const tone: Result['tone'] = effectiveOutcome === 'not-met' ? 'warning' : effectiveOutcome === 'met' ? 'success' : 'neutral';

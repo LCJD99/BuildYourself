@@ -62,7 +62,7 @@ function describePlan(plan) {
   const blockers = plan.validation.issues.length ? `\n待补充：${plan.validation.issues.join('；')}` : '\n契约校验通过，可以请求用户核对。';
   const milestones = plan.milestones.map(item => `- ID ${item.id} · ${item.stage === 'near' ? '近期' : '远期'}：${item.title || '未命名'}；标准：${item.successCriteria || '待细化'}；评估：${item.standardAssessment}；证据可获得性：${item.evidenceAvailability}；说明：${item.reviewNote || '待补充'}；证据要求：${item.evidenceRequirement || '待补充'}`).join('\n') || '待补充';
   const actions = plan.nextActions.map(item => `- ID ${item.id} · ${item.title || '待补充'}${item.details ? `：${item.details}` : ''}${item.estimateMinutes ? `（约 ${item.estimateMinutes} 分钟）` : ''} · 优先级 ${item.priority || 'medium'} · 硬截止 ${item.hardDeadline || '无'} · 里程碑 ${item.milestoneId || '待关联'} · 依赖 ${item.dependsOn?.join(', ') || '无'} · ${item.specificity === 'concrete' ? '具体行动' : '待细化'}`).join('\n') || '待补充';
-  const evidence = plan.evidenceRequirements.map(item => `- ${item.item || '待补充'}：${item.description || '待补充'}（最低 ${item.minimumLevel || '待设置'}）`).join('\n') || '待补充';
+  const evidence = plan.evidenceRequirements.map(item => `- ID ${item.id} · ${item.item || '待补充'}：${item.description || '待补充'}（最低 ${item.minimumLevel || '待设置'}）`).join('\n') || '待补充';
   const constraints = plan.constraints.status === 'confirmed' ? (plan.constraints.items.join('；') || '已确认无额外限制') : '待确认';
   const status = {
     draft: '草稿（尚未启用，不进入自动规划）',
@@ -72,7 +72,30 @@ function describePlan(plan) {
     archived: '已归档',
     abandoned: '已放弃',
   }[plan.status] || plan.status;
-  return `目标 ID：${plan.id}\n目标：${plan.title || '未命名目标'}\n状态：${status}${plan.lifecycleReason ? `\n状态原因：${plan.lifecycleReason}` : ''}\n使用场景：${plan.context || '待补充'}\n成功描述：${plan.successDescription || '待补充'}\n可观察结果：${plan.observableResult || '待补充'}\n当前基础：${plan.baselineStatus}${plan.baselineAction ? `；基线行动：${plan.baselineAction}` : ''}\n关键限制：${constraints}\n复盘周期：${plan.reviewCycleDays ? `每 ${plan.reviewCycleDays} 天` : '待补充'}\n里程碑：\n${milestones}\n近期行动：\n${actions}\n证据要求：\n${evidence}${blockers}`;
+  const contractVersion = plan.contractVersion ? `\n当前生效契约版本：${plan.contractVersion}` : '';
+  return `目标 ID：${plan.id}\n目标：${plan.title || '未命名目标'}\n状态：${status}${contractVersion}${plan.lifecycleReason ? `\n状态原因：${plan.lifecycleReason}` : ''}\n使用场景：${plan.context || '待补充'}\n成功描述：${plan.successDescription || '待补充'}\n可观察结果：${plan.observableResult || '待补充'}\n当前基础：${plan.baselineStatus}${plan.baselineAction ? `；基线行动：${plan.baselineAction}` : ''}\n关键限制：${constraints}\n复盘周期：${plan.reviewCycleDays ? `每 ${plan.reviewCycleDays} 天` : '待补充'}\n里程碑：\n${milestones}\n近期行动：\n${actions}\n证据要求：\n${evidence}${blockers}`;
+}
+
+function describeContractSnapshot(plan) {
+  const milestones = plan.milestones.map(item => `- ID ${item.id} · ${item.title || '未命名'}：${item.successCriteria || '标准待细化'}；证据要求：${item.evidenceRequirement || '待补充'}`).join('\n') || '无';
+  const evidence = plan.evidenceRequirements.map(item => `- ID ${item.id} · ${item.item || '待补充'}：${item.description || '待补充'}（最低 ${item.minimumLevel || '待设置'}）`).join('\n') || '无';
+  const constraints = plan.constraints.status === 'confirmed' ? plan.constraints.items.join('；') || '无额外限制' : '待确认';
+  return `目标：${plan.title || '未命名目标'}\n领域：${plan.domain}\n成功描述：${plan.successDescription || '待补充'}\n可观察结果：${plan.observableResult || '待补充'}\n约束：${constraints}\n复盘周期：${plan.reviewCycleDays ? `每 ${plan.reviewCycleDays} 天` : '待补充'}\n里程碑：\n${milestones}\n证据要求：\n${evidence}`;
+}
+
+function describeContractChange(change) {
+  return `目标契约变更 ID：${change.id} · 状态：${change.status} · 基于版本 ${change.baseVersion}\n变更说明：${change.summary}\n变更字段：${change.changedFields.join('、') || '无'}\n\n原契约：\n${describeContractSnapshot(change.previousPlan)}\n\n拟议的新契约：\n${describeContractSnapshot(change.proposedPlan)}`;
+}
+
+function describeEvaluation(evaluation) {
+  const rule = evaluation.ruleSnapshot;
+  const standard = rule.milestone?.successCriteria || rule.successDescription || '未设置';
+  const milestone = rule.milestone ? `里程碑：${rule.milestone.title || rule.milestone.id}` : '总体目标评价';
+  const evidenceRequirements = (rule.evidenceRequirements || []).map(item => `- ID ${item.id} · ${item.item || '待补充'}：${item.description || '待补充'}（最低 ${item.minimumLevel || '待设置'}）`).join('\n') || '无';
+  const outcome = evaluation.outcome === 'met' ? '提出达到标准' : evaluation.outcome === 'not_met' ? '提出未达到标准' : '提出证据不足';
+  const status = evaluation.status === 'pending_confirmation' ? '待用户核对' : evaluation.status === 'confirmed' ? '用户已确认调用方结论' : evaluation.status === 'not_met' ? '未满足标准' : evaluation.outcome === 'insufficient' ? '调用方提出证据不足' : '系统证据门槛未通过';
+  const gate = `最低证据等级 ${evaluation.evidenceGate.requiredLevel}：${evaluation.evidenceGate.status === 'qualified' ? `已满足（${evaluation.evidenceGate.qualifiedEvidenceIds.length} 条达标证据）` : '未满足'}`;
+  return `评价 ID：${evaluation.id} · ${status}\n观察时间：${evaluation.observedAt} · 评价时间：${evaluation.evaluatedAt}\n评价来源：调用方提出的结论（${outcome}）；系统只核对当时契约规定的证据等级，不独立判断自然语言标准是否达到。\n证据门槛：${gate}\n实际使用契约：版本 ${evaluation.contractVersion.version}（${evaluation.contractVersion.id}）\n${milestone}\n当时标准：${standard}\n证据要求：\n${evidenceRequirements}\n结论说明：${evaluation.summary}\n依据：${evaluation.reasons.join('；') || '无补充说明'}\n证据 ID：${evaluation.evidenceIds.join('、') || '无'}`;
 }
 
 function describeTaskProposals(proposals, actions = []) {
@@ -100,17 +123,33 @@ export default function (pi) {
   pi.registerTool({
     name: 'goal_planning',
     label: 'Goal Planning',
-    description: 'Create or edit a goal contract draft, inspect saved plans, or activate a validated plan after explicit user confirmation.',
-    promptSnippet: 'Create and review goal contract drafts; activation requires explicit user confirmation.',
+    description: 'Create and edit goal drafts, review versioned contract changes, evaluate progress against the effective contract, and inspect history.',
+    promptSnippet: 'Version active goal contract changes and persist evaluations against the exact contract version used.',
     promptGuidelines: [
       'Use goal_planning to list plans, save or edit a draft, and activate a validated draft only after the user explicitly confirms it.',
       'When saving an edit, include the changed fields and preserve all other known contract details; drafts stay outside automatic planning until activation.',
       'Before activation, show the title, success description, observable result, milestones, evidence requirements, constraints, review cycle, and near-term actions to the user.',
       'For each concrete action, include an estimate when supported, priority (high/medium/low), an explicit hard deadline only when stated, dependencies on action IDs when applicable, and a related near milestone ID when clear. Reuse IDs from this draft and never invent deadlines or dependencies.',
+      'For an active or paused goal contract change, first use propose_change. Show the stored before/after contract and do not update the effective version until the user explicitly approves and the interactive confirmation succeeds.',
+      'Preserve milestone and evidence requirement IDs when editing. Keep nextActions unchanged in contract changes; task editing has its own workflow.',
+      'New progress evaluations use the current effective contract, regardless of observedAt. Set backfill=true only when the user explicitly requests evaluating a past observation under the version effective at that time.',
+      'Before proposing a progress evaluation, call list_history and use only evidence candidates explicitly associated with that goal; select evidence ids from that returned list.',
+      'An evaluation outcome is a caller-supplied user or Agent assessment, not an independent system judgment. The system only checks evidence level against the stored contract. Keep any qualified conclusion pending user confirmation, and explain that the natural-language criterion was not independently verified.',
+      'History must display its stored contract version and rule snapshot rather than evaluating it again against current criteria.',
     ],
     parameters: Type.Object({
-      action: oneOf(['list', 'save_draft', 'activate']),
+      action: oneOf(['list', 'save_draft', 'activate', 'propose_change', 'edit_change', 'confirm_change', 'reject_change', 'list_history', 'evaluate_progress', 'confirm_evaluation']),
       draftId: Type.Optional(Type.String()),
+      goalPlanId: Type.Optional(Type.String()),
+      changeId: Type.Optional(Type.String()),
+      evaluationId: Type.Optional(Type.String()),
+      summary: optionalText(),
+      outcome: Type.Optional(oneOf(['insufficient', 'not_met', 'met'])),
+      milestoneId: optionalText(),
+      evidenceIds: Type.Optional(Type.Array(Type.String())),
+      reasons: Type.Optional(Type.Array(Type.String())),
+      observedAt: optionalText(),
+      backfill: Type.Optional(Type.Boolean()),
       plan: Type.Optional(planSchema),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -120,6 +159,75 @@ export default function (pi) {
           const plans = data.plans.map(describePlan).join('\n\n') || '目前没有目标计划。';
           const actions = data.pendingActions.map(action => `- ${action.title}（${action.goalTitle}，待排）`).join('\n') || '暂无待排行动。';
           return result(`${plans}\n\n近期行动待排池：\n${actions}`);
+        }
+
+        if (params.action === 'list_history') {
+          if (!params.goalPlanId) return result('读取目标版本历史需要提供目标 ID。', true);
+          const query = params.observedAt ? `?observedAt=${encodeURIComponent(params.observedAt)}` : '';
+          const [history, evaluationData] = await Promise.all([
+            api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/contract-changes${query}`),
+            api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/evaluations`),
+          ]);
+          const versions = history.versions.map(version => `版本 ${version.version} · ${version.effectiveAt} · ${version.changeSummary}\n${describeContractSnapshot(version.plan)}`).join('\n\n') || '暂无生效版本。';
+          const changes = history.changes.map(describeContractChange).join('\n\n') || '暂无变更提议。';
+          const evaluations = evaluationData.evaluations.map(describeEvaluation).join('\n\n') || '暂无进展评价。';
+          const evidenceCandidates = evaluationData.evidenceCandidates.map(evidence => `- ${evidence.id} · ${evidence.level} · ${evidence.observedAt} · ${evidence.reference}：${evidence.text}${evidence.goalActionId ? `（行动 ${evidence.goalActionId}）` : ''}`).join('\n') || '暂无明确关联此目标的证据。';
+          const applicable = history.applicableVersion ? `\n该观察时间适用版本：${history.applicableVersion.version}（${history.applicableVersion.id}）` : '';
+          return result(`目标 ${params.goalPlanId} · 当前版本 ${history.currentVersion ?? '尚未生效'}${applicable}\n\n版本历史：\n${versions}\n\n变更记录：\n${changes}\n\n明确关联到此目标的证据：\n${evidenceCandidates}\n\n已保存的进展评价：\n${evaluations}`);
+        }
+
+        if (params.action === 'propose_change' || params.action === 'edit_change') {
+          if (!params.goalPlanId || !params.plan) return result('提出目标契约变更需要目标 ID 和完整拟议内容。', true);
+          if (params.action === 'edit_change' && !params.changeId) return result('编辑契约变更需要变更 ID。', true);
+          const change = await api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/contract-changes`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: params.action === 'propose_change' ? 'propose' : 'edit', changeId: params.changeId, plan: params.plan, summary: params.summary }),
+          });
+          return result(`变更仅保存为待核对提议；当前有效契约未改变。\n${describeContractChange(change.change)}`);
+        }
+
+        if (params.action === 'confirm_change' || params.action === 'reject_change') {
+          if (!params.goalPlanId || !params.changeId) return result('处理目标契约变更需要目标 ID 和变更 ID。', true);
+          const history = await api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/contract-changes`);
+          const change = history.changes.find(item => item.id === params.changeId);
+          if (!change || change.status !== 'pending_review') return result('找不到待核对的契约变更，请先查看版本历史。', true);
+          if (params.action === 'confirm_change') {
+            if (!ctx.hasUI) return result('确认目标契约变更需要交互式确认，请在 pi 交互界面核对前后内容。', true);
+            const confirmed = await ctx.ui.confirm('确认目标契约变更', `${describeContractChange(change)}\n\n确认后将创建新契约版本，并从现在生效。`);
+            if (!confirmed) return result('用户取消确认；当前版本继续生效，提议仍待核对。');
+          }
+          const data = await api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/contract-changes`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: params.action === 'confirm_change' ? 'confirm' : 'reject', changeId: params.changeId, confirmed: params.action === 'confirm_change' }),
+          });
+          return result(params.action === 'confirm_change'
+            ? `目标契约已更新并创建新版本。\n${describeContractChange(data.change)}`
+            : `已拒绝这份提议；当前契约继续生效。\n${describeContractChange(data.change)}`);
+        }
+
+        if (params.action === 'evaluate_progress') {
+          if (!params.goalPlanId || !params.outcome || !params.summary) return result('记录进展评价需要目标 ID、结果和摘要。', true);
+          if (params.backfill && !params.observedAt) return result('按历史口径回填必须提供明确的 observedAt。', true);
+          const data = await api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/evaluations`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'record', outcome: params.outcome, summary: params.summary, reasons: params.reasons || [],
+              milestoneId: params.milestoneId, evidenceIds: params.evidenceIds || [], observedAt: params.observedAt, backfill: params.backfill === true }),
+          });
+          return result(`已保存调用方提出的候选评价；系统只核对证据等级门槛，没有独立判断自然语言标准是否达到。${data.evaluation.status === 'pending_confirmation' ? '请再核对候选结论并明确确认。' : ''}\n${describeEvaluation(data.evaluation)}`);
+        }
+
+        if (params.action === 'confirm_evaluation') {
+          if (!params.goalPlanId || !params.evaluationId) return result('确认进展评价需要目标 ID 和评价 ID。', true);
+          const { evaluations } = await api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/evaluations`);
+          const evaluation = evaluations.find(item => item.id === params.evaluationId);
+          if (!evaluation || evaluation.status !== 'pending_confirmation') return result('找不到待确认的进展评价。', true);
+          if (!ctx.hasUI) return result('确认进展评价需要交互式确认。', true);
+          if (!await ctx.ui.confirm('确认目标进展', describeEvaluation(evaluation))) return result('用户取消确认；进展仍为待确认。');
+          const data = await api(`/api/goal-plans/${encodeURIComponent(params.goalPlanId)}/evaluations`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'confirm', evaluationId: params.evaluationId, confirmed: true }),
+          });
+          return result(`已确认进展。\n${describeEvaluation(data.evaluation)}`);
         }
 
         if (params.action === 'save_draft') {

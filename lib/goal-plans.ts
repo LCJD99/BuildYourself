@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase, readEvidence } from './store';
 import type { Evidence } from './model';
+import { qualitativeMilestoneReview } from './milestone-review';
 import { recordTaskChange } from './milestone-store';
 import type { ActionPriority } from './daily-planner';
 
@@ -54,7 +55,7 @@ export type GoalPlanDraft = {
 
 export type GoalPlanValidation = { ready: boolean; issues: string[] };
 export type CompletionEvidence = { requirementId: string; description: string; level: EvidenceLevel; observedAt?: string };
-export type GoalPlanEventAction = 'created' | 'activated' | 'paused' | 'resumed' | 'completion_requested' | 'completion_cancelled' | 'completion_confirmed' | 'archived' | 'abandoned' | 'imported';
+export type GoalPlanEventAction = 'created' | 'activated' | 'paused' | 'resumed' | 'completion_requested' | 'completion_cancelled' | 'completion_confirmed' | 'archived' | 'abandoned' | 'imported' | 'contract_changed' | 'progress_confirmed';
 type GoalPlanLifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
 export type GoalPlanEvent = {
   id: string;
@@ -78,6 +79,65 @@ export type GoalPlan = GoalPlanDraft & {
   lifecycleEvents: GoalPlanEvent[];
   pendingCompletion: PendingGoalCompletion | null;
   validation: GoalPlanValidation;
+  contractVersion: number | null;
+};
+
+export type GoalPlanContractVersion = {
+  id: string;
+  goalPlanId: string;
+  version: number;
+  effectiveAt: string;
+  createdAt: string;
+  changeSummary: string;
+  eventId: string | null;
+  plan: GoalPlanDraft;
+};
+
+export type GoalPlanContractChange = {
+  id: string;
+  goalPlanId: string;
+  baseVersion: number;
+  status: 'pending_review' | 'confirmed' | 'rejected';
+  summary: string;
+  changedFields: string[];
+  previousPlan: GoalPlanDraft;
+  proposedPlan: GoalPlanDraft;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+};
+
+export type GoalPlanEvaluationRuleSnapshot = {
+  ruleVersion: 'goal-contract-qualitative-v1';
+  contractVersionId: string;
+  contractVersion: number;
+  goalTitle: string | null;
+  domain: GoalDomain;
+  successDescription: string | null;
+  observableResult: string | null;
+  milestone: Pick<GoalMilestone, 'id' | 'title' | 'successCriteria' | 'standardAssessment' | 'evidenceAvailability' | 'reviewNote' | 'evidenceRequirement'> | null;
+  minimumEvidenceLevel: EvidenceLevel;
+  evidenceRequirements: GoalPlanDraft['evidenceRequirements'];
+  reviewCycleDays: number | null;
+};
+
+export type GoalPlanEvaluation = {
+  id: string;
+  goalPlanId: string;
+  contractVersion: GoalPlanContractVersion;
+  ruleSnapshot: GoalPlanEvaluationRuleSnapshot;
+  assessmentSource: 'caller_supplied';
+  evidenceGate: { requiredLevel: EvidenceLevel; qualifiedEvidenceIds: string[]; status: 'qualified' | 'insufficient' };
+  outcome: 'insufficient' | 'not_met' | 'met';
+  status: 'insufficient' | 'not_met' | 'pending_confirmation' | 'confirmed';
+  summary: string;
+  reasons: string[];
+  milestoneId: string | null;
+  evidenceIds: string[];
+  evidenceSnapshots: Evidence[];
+  observedAt: string;
+  evaluatedAt: string;
+  confirmedAt: string | null;
 };
 
 export type GoalPlanAction = {
@@ -422,6 +482,22 @@ function createGoalPlansTable(database: ReturnType<typeof openDatabase>, tableNa
   )`);
 }
 
+function migrateGoalPlanContractVersions(database: DatabaseSync) {
+  const legacyPlans = database.prepare(`SELECT id,plan_json,created_at,activated_at
+    FROM goal_plans p WHERE p.status<>'draft'
+      AND NOT EXISTS (SELECT 1 FROM goal_plan_contract_versions v WHERE v.goal_plan_id=p.id)`)
+    .all() as Array<{ id: string; plan_json: string; created_at: string; activated_at: string | null }>;
+  const insert = database.prepare(`INSERT OR IGNORE INTO goal_plan_contract_versions
+    (id,goal_plan_id,version,effective_at,plan_json,change_summary,event_id,created_at)
+    VALUES (?,?,1,?,?,?, ?,?)`);
+  for (const plan of legacyPlans) {
+    const event = database.prepare(`SELECT id FROM goal_plan_events
+      WHERE goal_plan_id=? AND action='activated' ORDER BY created_at,rowid LIMIT 1`).get(plan.id) as { id: string } | undefined;
+    const effectiveAt = plan.activated_at ?? plan.created_at;
+    insert.run(randomUUID(), plan.id, effectiveAt, plan.plan_json, '目标初始契约', event?.id ?? null, effectiveAt);
+  }
+}
+
 function ensureSchema() {
   const database = openDatabase();
   let migrated = false;
@@ -484,6 +560,49 @@ function ensureSchema() {
       evidence_json TEXT,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS goal_plan_contract_versions (
+      id TEXT PRIMARY KEY,
+      goal_plan_id TEXT NOT NULL REFERENCES goal_plans(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      effective_at TEXT NOT NULL,
+      plan_json TEXT NOT NULL,
+      change_summary TEXT NOT NULL,
+      event_id TEXT REFERENCES goal_plan_events(id),
+      created_at TEXT NOT NULL,
+      UNIQUE(goal_plan_id,version)
+    );
+    CREATE TABLE IF NOT EXISTS goal_plan_contract_changes (
+      id TEXT PRIMARY KEY,
+      goal_plan_id TEXT NOT NULL REFERENCES goal_plans(id) ON DELETE CASCADE,
+      base_version INTEGER NOT NULL,
+      previous_plan_json TEXT NOT NULL,
+      proposed_plan_json TEXT NOT NULL,
+      changed_fields_json TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending_review','confirmed','rejected')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS one_pending_contract_change_per_goal
+      ON goal_plan_contract_changes(goal_plan_id) WHERE status='pending_review';
+    CREATE TABLE IF NOT EXISTS goal_plan_evaluations (
+      id TEXT PRIMARY KEY,
+      goal_plan_id TEXT NOT NULL REFERENCES goal_plans(id) ON DELETE CASCADE,
+      contract_version_id TEXT NOT NULL REFERENCES goal_plan_contract_versions(id),
+      rule_snapshot_json TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('insufficient','not_met','met')),
+      status TEXT NOT NULL CHECK (status IN ('insufficient','not_met','pending_confirmation','confirmed')),
+      summary TEXT NOT NULL,
+      reasons_json TEXT NOT NULL,
+      milestone_id TEXT,
+      evidence_ids_json TEXT NOT NULL,
+      evidence_snapshots_json TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      evaluated_at TEXT NOT NULL,
+      confirmed_at TEXT,
+      assessment_source TEXT NOT NULL DEFAULT 'caller_supplied'
+    );
     CREATE TABLE IF NOT EXISTS goal_plan_completion_requests (
       goal_plan_id TEXT PRIMARY KEY REFERENCES goal_plans(id) ON DELETE CASCADE,
       evidence_json TEXT NOT NULL,
@@ -517,6 +636,8 @@ function ensureSchema() {
       PRIMARY KEY(project_id,goal_plan_id,milestone_id)
     );
   `);
+  const evaluationColumns = new Set((database.prepare('PRAGMA table_info(goal_plan_evaluations)').all() as Array<{ name: string }>).map(column => column.name));
+  if (!evaluationColumns.has('assessment_source')) database.exec("ALTER TABLE goal_plan_evaluations ADD COLUMN assessment_source TEXT NOT NULL DEFAULT 'caller_supplied'");
   const schedulingColumns = new Set((database.prepare('PRAGMA table_info(goal_plan_actions)').all() as Array<{ name: string }>).map(column => column.name));
   if (!schedulingColumns.has('priority')) database.exec("ALTER TABLE goal_plan_actions ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium'");
   if (!schedulingColumns.has('milestone_id')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN milestone_id TEXT');
@@ -548,6 +669,7 @@ function ensureSchema() {
     database.exec("UPDATE goal_plan_actions SET dependency_ids=dependencies_json WHERE dependency_ids='[]' AND dependencies_json<>'[]'");
   }
   migrateLegacyProjectLinks(database);
+  migrateGoalPlanContractVersions(database);
   return database;
 }
 
@@ -574,14 +696,16 @@ function readPendingCompletion(database: ReturnType<typeof openDatabase>, id: st
 }
 
 function appendEvent(database: ReturnType<typeof openDatabase>, goalPlanId: string, fromStatus: GoalPlanStatus | null, toStatus: GoalPlanStatus, action: GoalPlanEventAction, reason: string | null = null, evidence: CompletionEvidence[] | null = null, createdAt = new Date().toISOString()) {
+  const id = randomUUID();
   database.prepare(`INSERT INTO goal_plan_events (id, goal_plan_id, from_status, to_status, action, reason, evidence_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(randomUUID(), goalPlanId, fromStatus, toStatus, action, reason, evidence ? JSON.stringify(evidence) : null, createdAt);
+    .run(id, goalPlanId, fromStatus, toStatus, action, reason, evidence ? JSON.stringify(evidence) : null, createdAt);
+  return id;
 }
 
-function toGoalPlan(row: GoalPlanRow, lifecycleEvents: GoalPlanEvent[] = [], pendingCompletion: PendingGoalCompletion | null = null): GoalPlan {
+function toGoalPlan(row: GoalPlanRow, lifecycleEvents: GoalPlanEvent[] = [], pendingCompletion: PendingGoalCompletion | null = null, contractVersion: number | null = null): GoalPlan {
   const plan = normalizeDraft(JSON.parse(row.plan_json));
-  return { ...plan, id: row.id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, activatedAt: row.activated_at, completedAt: row.completed_at, lifecycleReason: row.lifecycle_reason, lifecycleEvents, pendingCompletion, validation: validateGoalPlan(plan) };
+  return { ...plan, id: row.id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, activatedAt: row.activated_at, completedAt: row.completed_at, lifecycleReason: row.lifecycle_reason, lifecycleEvents, pendingCompletion, validation: validateGoalPlan(plan), contractVersion };
 }
 
 export function saveGoalPlanDraft(input: unknown): GoalPlan {
@@ -633,7 +757,8 @@ export function getGoalPlan(id: string): GoalPlan | null {
   const database = ensureSchema();
   try {
     const row = database.prepare('SELECT * FROM goal_plans WHERE id=?').get(id) as GoalPlanRow | undefined;
-    return row ? toGoalPlan(row, readEvents(database, id), readPendingCompletion(database, id)) : null;
+    const version = database.prepare('SELECT version FROM goal_plan_contract_versions WHERE goal_plan_id=? ORDER BY version DESC LIMIT 1').get(id) as { version: number } | undefined;
+    return row ? toGoalPlan(row, readEvents(database, id), readPendingCompletion(database, id), version?.version ?? null) : null;
   } finally {
     database.close();
   }
@@ -645,6 +770,8 @@ export function listGoalPlans(): GoalPlan[] {
     const rows = database.prepare('SELECT * FROM goal_plans ORDER BY updated_at DESC, created_at DESC').all() as GoalPlanRow[];
     const events = database.prepare('SELECT * FROM goal_plan_events ORDER BY created_at, rowid').all() as GoalPlanEventRow[];
     const pending = database.prepare('SELECT * FROM goal_plan_completion_requests').all() as { goal_plan_id: string; evidence_json: string; requested_at: string }[];
+    const versions = database.prepare('SELECT goal_plan_id,MAX(version) AS version FROM goal_plan_contract_versions GROUP BY goal_plan_id').all() as Array<{ goal_plan_id: string; version: number }>;
+    const versionByPlan = new Map(versions.map(row => [row.goal_plan_id, row.version]));
     const eventsByPlan = new Map<string, GoalPlanEvent[]>();
     for (const row of events) {
       const list = eventsByPlan.get(row.goal_plan_id) ?? [];
@@ -652,7 +779,504 @@ export function listGoalPlans(): GoalPlan[] {
       eventsByPlan.set(row.goal_plan_id, list);
     }
     const pendingByPlan = new Map(pending.map(row => [row.goal_plan_id, { evidence: JSON.parse(row.evidence_json) as CompletionEvidence[], requestedAt: row.requested_at }]));
-    return rows.map(row => toGoalPlan(row, eventsByPlan.get(row.id) ?? [], pendingByPlan.get(row.id) ?? null));
+    return rows.map(row => toGoalPlan(row, eventsByPlan.get(row.id) ?? [], pendingByPlan.get(row.id) ?? null, versionByPlan.get(row.id) ?? null));
+  } finally {
+    database.close();
+  }
+}
+
+type GoalPlanContractVersionRow = {
+  id: string;
+  goal_plan_id: string;
+  version: number;
+  effective_at: string;
+  plan_json: string;
+  change_summary: string;
+  event_id: string | null;
+  created_at: string;
+};
+
+function contractVersionFromRow(row: GoalPlanContractVersionRow): GoalPlanContractVersion {
+  return {
+    id: row.id,
+    goalPlanId: row.goal_plan_id,
+    version: Number(row.version),
+    effectiveAt: row.effective_at,
+    createdAt: row.created_at,
+    changeSummary: row.change_summary,
+    eventId: row.event_id,
+    plan: normalizeDraft(JSON.parse(row.plan_json)),
+  };
+}
+
+function currentContractVersion(database: DatabaseSync, goalPlanId: string) {
+  const row = database.prepare(`SELECT * FROM goal_plan_contract_versions
+    WHERE goal_plan_id=? ORDER BY version DESC LIMIT 1`).get(goalPlanId) as GoalPlanContractVersionRow | undefined;
+  return row ? contractVersionFromRow(row) : null;
+}
+
+export function listGoalPlanContractVersions(goalPlanId: string): GoalPlanContractVersion[] {
+  const database = ensureSchema();
+  try {
+    return (database.prepare(`SELECT * FROM goal_plan_contract_versions
+      WHERE goal_plan_id=? ORDER BY version`).all(goalPlanId) as GoalPlanContractVersionRow[]).map(contractVersionFromRow);
+  } finally {
+    database.close();
+  }
+}
+
+function normalizeTimestamp(value: unknown, field: string) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} 必须是有效时间`);
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new Error(`${field} 必须是有效时间`);
+  return parsed.toISOString();
+}
+
+function contractVersionAt(database: DatabaseSync, goalPlanId: string, observedAt: string) {
+  const row = database.prepare(`SELECT * FROM goal_plan_contract_versions
+    WHERE goal_plan_id=? AND effective_at<=? ORDER BY effective_at DESC,version DESC LIMIT 1`).get(goalPlanId, observedAt) as GoalPlanContractVersionRow | undefined;
+  return row ? contractVersionFromRow(row) : null;
+}
+
+export function getGoalPlanContractVersionAt(goalPlanId: string, observedAt: string): GoalPlanContractVersion | null {
+  const timestamp = normalizeTimestamp(observedAt, '进展时间');
+  const database = ensureSchema();
+  try {
+    return contractVersionAt(database, goalPlanId, timestamp);
+  } finally {
+    database.close();
+  }
+}
+
+function inheritContractItemIds(entries: unknown[], previous: Array<{ id: string; [key: string]: unknown }>, key: 'title' | 'item') {
+  const used = new Set<string>();
+  return entries.map((entry, index) => {
+    const item = object(entry, `目标契约条目 ${index + 1}`);
+    if (typeof item.id === 'string' && item.id.trim()) {
+      used.add(item.id.trim());
+      return item;
+    }
+    const itemKey = nullableText(item[key], key, 240);
+    const match = itemKey ? previous.find(candidate => candidate[key] === itemKey && !used.has(candidate.id)) : undefined;
+    const positional = previous.length === entries.length ? previous[index] : undefined;
+    const id = match?.id ?? (positional && !used.has(positional.id) ? positional.id : undefined);
+    if (id) used.add(id);
+    return id ? { ...item, id } : item;
+  });
+}
+
+const contractChangeFields: Array<{ key: keyof GoalPlanDraft; label: string }> = [
+  { key: 'title', label: '目标名称' },
+  { key: 'domain', label: '目标领域' },
+  { key: 'context', label: '使用场景' },
+  { key: 'successDescription', label: '成功描述' },
+  { key: 'observableResult', label: '可观察结果' },
+  { key: 'baselineStatus', label: '当前基础' },
+  { key: 'baselineAction', label: '基线行动' },
+  { key: 'milestones', label: '里程碑与评价标准' },
+  { key: 'constraints', label: '目标约束' },
+  { key: 'evidenceRequirements', label: '证据要求' },
+  { key: 'reviewCycleDays', label: '复盘周期' },
+];
+
+function normalizeContractChangePlan(previous: GoalPlanDraft, input: unknown) {
+  const value = object(input, '目标契约变更');
+  const patch = object(value.plan, '目标契约变更内容');
+  const merged = {
+    ...previous,
+    ...patch,
+    sourceIntent: previous.sourceIntent,
+    nextActions: previous.nextActions,
+    milestones: Array.isArray(patch.milestones)
+      ? inheritContractItemIds(patch.milestones, previous.milestones, 'title')
+      : previous.milestones,
+    evidenceRequirements: Array.isArray(patch.evidenceRequirements)
+      ? inheritContractItemIds(patch.evidenceRequirements, previous.evidenceRequirements, 'item')
+      : previous.evidenceRequirements,
+    constraints: patch.constraints === undefined
+      ? previous.constraints
+      : { ...previous.constraints, ...object(patch.constraints, '约束') },
+  };
+  const plan = normalizeDraft(merged);
+  const validation = validateGoalPlan(plan);
+  if (!validation.ready) throw new Error(`目标契约变更未通过校验：${validation.issues.join(' ')}`);
+  const changedFields = contractChangeFields
+    .filter(({ key }) => JSON.stringify(previous[key]) !== JSON.stringify(plan[key]))
+    .map(({ label }) => label);
+  if (!changedFields.length) throw new Error('变更内容与当前目标契约相同');
+  const summary = nullableText(value.summary, '变更说明', 1000) ?? `调整${changedFields.join('、')}`;
+  return { plan, changedFields, summary };
+}
+
+type GoalPlanContractChangeRow = {
+  id: string;
+  goal_plan_id: string;
+  base_version: number;
+  previous_plan_json: string;
+  proposed_plan_json: string;
+  changed_fields_json: string;
+  summary: string;
+  status: 'pending_review' | 'confirmed' | 'rejected';
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+};
+
+function contractChangeFromRow(row: GoalPlanContractChangeRow): GoalPlanContractChange {
+  let changedFields: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(row.changed_fields_json);
+    if (Array.isArray(parsed)) changedFields = parsed.filter((field): field is string => typeof field === 'string');
+  } catch {
+    changedFields = [];
+  }
+  return {
+    id: row.id,
+    goalPlanId: row.goal_plan_id,
+    baseVersion: Number(row.base_version),
+    status: row.status,
+    summary: row.summary,
+    changedFields,
+    previousPlan: normalizeDraft(JSON.parse(row.previous_plan_json)),
+    proposedPlan: normalizeDraft(JSON.parse(row.proposed_plan_json)),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    resolvedAt: row.resolved_at,
+  };
+}
+
+function getGoalPlanContractChange(database: DatabaseSync, goalPlanId: string, changeId: string) {
+  const row = database.prepare('SELECT * FROM goal_plan_contract_changes WHERE id=? AND goal_plan_id=?').get(changeId, goalPlanId) as GoalPlanContractChangeRow | undefined;
+  return row ? contractChangeFromRow(row) : null;
+}
+
+export function listGoalPlanContractChanges(goalPlanId: string): GoalPlanContractChange[] {
+  const database = ensureSchema();
+  try {
+    return (database.prepare(`SELECT * FROM goal_plan_contract_changes
+      WHERE goal_plan_id=? ORDER BY created_at,id`).all(goalPlanId) as GoalPlanContractChangeRow[]).map(contractChangeFromRow);
+  } finally {
+    database.close();
+  }
+}
+
+export function createGoalPlanContractChange(goalPlanId: string, input: unknown): GoalPlanContractChange {
+  const now = new Date().toISOString();
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const goal = database.prepare('SELECT status,plan_json FROM goal_plans WHERE id=?').get(goalPlanId) as { status: GoalPlanStatus; plan_json: string } | undefined;
+    if (!goal || (goal.status !== 'active' && goal.status !== 'paused')) throw new Error('只能为活跃或已暂停目标提议契约变更');
+    const current = currentContractVersion(database, goalPlanId);
+    if (!current) throw new Error('目标尚无生效的契约版本');
+    if (database.prepare("SELECT 1 FROM goal_plan_contract_changes WHERE goal_plan_id=? AND status='pending_review'").get(goalPlanId)) {
+      throw new Error('该目标已有待确认的契约变更，请先查看或编辑现有提议');
+    }
+    const previousPlan = normalizeDraft(JSON.parse(goal.plan_json));
+    const candidate = normalizeContractChangePlan(previousPlan, input);
+    const id = randomUUID();
+    database.prepare(`INSERT INTO goal_plan_contract_changes
+      (id,goal_plan_id,base_version,previous_plan_json,proposed_plan_json,changed_fields_json,summary,status,created_at,updated_at,resolved_at)
+      VALUES (?,?,?,?,?,?,?,'pending_review',?,?,NULL)`)
+      .run(id, goalPlanId, current.version, JSON.stringify(previousPlan), JSON.stringify(candidate.plan), JSON.stringify(candidate.changedFields), candidate.summary, now, now);
+    database.exec('COMMIT');
+    inTransaction = false;
+    return getGoalPlanContractChange(database, goalPlanId, id)!;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export function editGoalPlanContractChange(goalPlanId: string, changeId: string, input: unknown): GoalPlanContractChange {
+  const now = new Date().toISOString();
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const row = database.prepare(`SELECT * FROM goal_plan_contract_changes
+      WHERE id=? AND goal_plan_id=? AND status='pending_review'`).get(changeId, goalPlanId) as GoalPlanContractChangeRow | undefined;
+    if (!row) throw new Error('找不到待确认的目标契约变更');
+    const current = currentContractVersion(database, goalPlanId);
+    if (!current || current.version !== Number(row.base_version)) throw new Error('目标契约已变化，请基于当前版本重新提出变更');
+    const candidate = normalizeContractChangePlan(normalizeDraft(JSON.parse(row.previous_plan_json)), input);
+    database.prepare(`UPDATE goal_plan_contract_changes SET proposed_plan_json=?,changed_fields_json=?,summary=?,updated_at=? WHERE id=?`)
+      .run(JSON.stringify(candidate.plan), JSON.stringify(candidate.changedFields), candidate.summary, now, changeId);
+    database.exec('COMMIT');
+    inTransaction = false;
+    return getGoalPlanContractChange(database, goalPlanId, changeId)!;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export function resolveGoalPlanContractChange(goalPlanId: string, changeId: string, input: unknown): GoalPlanContractChange {
+  const request = object(input, '目标契约变更操作');
+  if (request.action !== 'confirm' && request.action !== 'reject') throw new Error('目标契约变更操作无效');
+  if (request.action === 'confirm' && request.confirmed !== true) throw new Error('需要单独确认目标契约变更');
+  const now = new Date().toISOString();
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const change = database.prepare(`SELECT * FROM goal_plan_contract_changes
+      WHERE id=? AND goal_plan_id=? AND status='pending_review'`).get(changeId, goalPlanId) as GoalPlanContractChangeRow | undefined;
+    if (!change) throw new Error('找不到待确认的目标契约变更');
+    const goal = database.prepare('SELECT status,plan_json FROM goal_plans WHERE id=?').get(goalPlanId) as { status: GoalPlanStatus; plan_json: string } | undefined;
+    if (!goal || (goal.status !== 'active' && goal.status !== 'paused')) throw new Error('该目标当前状态不能变更契约');
+    if (request.action === 'reject') {
+      database.prepare("UPDATE goal_plan_contract_changes SET status='rejected',updated_at=?,resolved_at=? WHERE id=?")
+        .run(now, now, changeId);
+      database.exec('COMMIT');
+      inTransaction = false;
+      return getGoalPlanContractChange(database, goalPlanId, changeId)!;
+    }
+    const current = currentContractVersion(database, goalPlanId);
+    if (!current || current.version !== Number(change.base_version)) throw new Error('目标契约已变化，请查看并确认基于最新版本的变更');
+    const proposedPlan = normalizeDraft(JSON.parse(change.proposed_plan_json));
+    const validation = validateGoalPlan(proposedPlan);
+    if (!validation.ready) throw new Error(`目标契约变更未通过校验：${validation.issues.join(' ')}`);
+    const eventId = appendEvent(database, goalPlanId, goal.status, goal.status, 'contract_changed', change.summary, null, now);
+    const nextVersion = current.version + 1;
+    database.prepare(`INSERT INTO goal_plan_contract_versions
+      (id,goal_plan_id,version,effective_at,plan_json,change_summary,event_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?)`)
+      .run(randomUUID(), goalPlanId, nextVersion, now, JSON.stringify(proposedPlan), change.summary, eventId, now);
+    database.prepare('UPDATE goal_plans SET source_intent=?,plan_json=?,updated_at=? WHERE id=?')
+      .run(proposedPlan.sourceIntent ?? '', JSON.stringify(proposedPlan), now, goalPlanId);
+    database.prepare("UPDATE goal_plan_contract_changes SET status='confirmed',updated_at=?,resolved_at=? WHERE id=?")
+      .run(now, now, changeId);
+    database.exec('COMMIT');
+    inTransaction = false;
+    return getGoalPlanContractChange(database, goalPlanId, changeId)!;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+type GoalPlanEvaluationRow = {
+  id: string;
+  goal_plan_id: string;
+  rule_snapshot_json: string;
+  assessment_source: 'caller_supplied';
+  outcome: GoalPlanEvaluation['outcome'];
+  status: GoalPlanEvaluation['status'];
+  summary: string;
+  reasons_json: string;
+  milestone_id: string | null;
+  evidence_ids_json: string;
+  evidence_snapshots_json: string;
+  observed_at: string;
+  evaluated_at: string;
+  confirmed_at: string | null;
+  contract_id: string;
+  contract_version: number;
+  contract_effective_at: string;
+  contract_plan_json: string;
+  contract_change_summary: string;
+  contract_event_id: string | null;
+  contract_created_at: string;
+};
+
+function evaluationFromRow(row: GoalPlanEvaluationRow): GoalPlanEvaluation {
+  const savedRuleSnapshot = JSON.parse(row.rule_snapshot_json) as Partial<GoalPlanEvaluationRuleSnapshot>;
+  const ranks: Record<EvidenceLevel, number> = { E1: 1, E2: 2, E3: 3 };
+  const requirementLevels = (savedRuleSnapshot.evidenceRequirements ?? [])
+    .map(requirement => requirement.minimumLevel)
+    .filter((level): level is EvidenceLevel => level === 'E1' || level === 'E2' || level === 'E3');
+  const minimumEvidenceLevel = savedRuleSnapshot.minimumEvidenceLevel ?? requirementLevels.reduce<EvidenceLevel>((minimum, level) =>
+    ranks[level] > ranks[minimum] ? level : minimum, 'E2');
+  const ruleSnapshot = { ...savedRuleSnapshot, minimumEvidenceLevel } as GoalPlanEvaluationRuleSnapshot;
+  const evidenceSnapshots = JSON.parse(row.evidence_snapshots_json) as Evidence[];
+  const qualifiedEvidenceIds = evidenceSnapshots
+    .filter(evidence => ranks[evidence.level] >= ranks[ruleSnapshot.minimumEvidenceLevel])
+    .map(evidence => evidence.id);
+  return {
+    id: row.id,
+    goalPlanId: row.goal_plan_id,
+    contractVersion: contractVersionFromRow({
+      id: row.contract_id,
+      goal_plan_id: row.goal_plan_id,
+      version: row.contract_version,
+      effective_at: row.contract_effective_at,
+      plan_json: row.contract_plan_json,
+      change_summary: row.contract_change_summary,
+      event_id: row.contract_event_id,
+      created_at: row.contract_created_at,
+    }),
+    ruleSnapshot,
+    assessmentSource: row.assessment_source,
+    evidenceGate: {
+      requiredLevel: ruleSnapshot.minimumEvidenceLevel,
+      qualifiedEvidenceIds,
+      status: qualifiedEvidenceIds.length ? 'qualified' : 'insufficient',
+    },
+    outcome: row.outcome,
+    status: row.status,
+    summary: row.summary,
+    reasons: JSON.parse(row.reasons_json) as string[],
+    milestoneId: row.milestone_id,
+    evidenceIds: JSON.parse(row.evidence_ids_json) as string[],
+    evidenceSnapshots: JSON.parse(row.evidence_snapshots_json) as Evidence[],
+    observedAt: row.observed_at,
+    evaluatedAt: row.evaluated_at,
+    confirmedAt: row.confirmed_at,
+  };
+}
+
+const goalPlanEvaluationSelect = `SELECT e.*,v.id AS contract_id,v.version AS contract_version,v.effective_at AS contract_effective_at,
+  v.plan_json AS contract_plan_json,v.change_summary AS contract_change_summary,v.event_id AS contract_event_id,v.created_at AS contract_created_at
+  FROM goal_plan_evaluations e JOIN goal_plan_contract_versions v ON v.id=e.contract_version_id`;
+
+export function recordGoalPlanEvaluation(goalPlanId: string, input: unknown): GoalPlanEvaluation {
+  const request = object(input, '目标进展评价');
+  const outcome = request.outcome;
+  if (outcome !== 'insufficient' && outcome !== 'not_met' && outcome !== 'met') throw new Error('进展评价结果无效');
+  const summary = nullableText(request.summary, '评价摘要', 2000);
+  if (!summary) throw new Error('请填写进展评价摘要');
+  const reasons = list(request.reasons, '评价依据').map((reason, index) => {
+    if (typeof reason !== 'string' || reason.trim().length > 1000) throw new Error(`评价依据 ${index + 1} 无效`);
+    return reason.trim();
+  }).filter(Boolean);
+  const evidenceIds = list(request.evidenceIds, '证据 ID').map((id, index) => {
+    if (typeof id !== 'string' || !id.trim()) throw new Error(`证据 ID ${index + 1} 无效`);
+    return id.trim();
+  });
+  if (new Set(evidenceIds).size !== evidenceIds.length) throw new Error('证据 ID 不能重复');
+  const observedAt = request.observedAt === undefined ? new Date().toISOString() : normalizeTimestamp(request.observedAt, '进展时间');
+  if (request.backfill !== undefined && typeof request.backfill !== 'boolean') throw new Error('回填标记无效');
+  const backfill = request.backfill === true;
+  if (backfill && request.observedAt === undefined) throw new Error('历史口径回填需要明确提供进展时间');
+  const milestoneId = nullableText(request.milestoneId, '里程碑 ID', 100);
+  const now = new Date().toISOString();
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const goal = database.prepare('SELECT status FROM goal_plans WHERE id=?').get(goalPlanId) as { status: GoalPlanStatus } | undefined;
+    if (!goal || goal.status === 'draft') throw new Error('只能评价已启用目标的进展');
+    const contractVersion = backfill
+      ? contractVersionAt(database, goalPlanId, observedAt)
+      : currentContractVersion(database, goalPlanId);
+    if (!contractVersion) throw new Error(backfill ? '该进展时间没有适用的目标契约版本' : '目标尚无生效的契约版本');
+    const plan = contractVersion.plan;
+    const milestone = milestoneId ? plan.milestones.find(item => item.id === milestoneId) : undefined;
+    if (milestoneId && !milestone) throw new Error('所选里程碑不属于本次评价使用的契约版本');
+    const allEvidence = readEvidence(database);
+    const evidenceSnapshots = evidenceIds.map(id => {
+      const evidence = allEvidence.find(item => item.id === id);
+      if (!evidence) throw new Error(`找不到证据 ${id}`);
+      if (evidence.goalPlanId !== goalPlanId) {
+        throw new Error(`证据「${evidence.reference}」未明确关联到该目标`);
+      }
+      if (evidence.goalActionId) {
+        const action = database.prepare('SELECT milestone_id FROM goal_plan_actions WHERE id=? AND goal_plan_id=?')
+          .get(evidence.goalActionId, goalPlanId) as { milestone_id: string | null } | undefined;
+        if (!action) throw new Error(`证据「${evidence.reference}」关联的行动不属于该目标`);
+        if (milestoneId && action.milestone_id !== milestoneId) throw new Error(`证据「${evidence.reference}」关联的行动不属于所选里程碑`);
+      }
+      return evidence;
+    });
+    const ranks: Record<EvidenceLevel, number> = { E1: 1, E2: 2, E3: 3 };
+    const minimumEvidenceLevel = plan.evidenceRequirements.reduce<EvidenceLevel>((minimum, item) =>
+      item.minimumLevel && ranks[item.minimumLevel] > ranks[minimum] ? item.minimumLevel : minimum, 'E1');
+    const review = qualitativeMilestoneReview({
+      standard: milestone?.successCriteria || plan.successDescription || '未设置评价标准。',
+      summary,
+      reasons,
+      evidence: evidenceSnapshots,
+      outcome: outcome === 'not_met' ? 'not-met' : outcome,
+      confirmationRequired: true,
+      confirmation: null,
+      minimumEvidenceLevel,
+    });
+    const ruleSnapshot: GoalPlanEvaluationRuleSnapshot = {
+      ruleVersion: 'goal-contract-qualitative-v1',
+      contractVersionId: contractVersion.id,
+      contractVersion: contractVersion.version,
+      goalTitle: plan.title,
+      domain: plan.domain,
+      successDescription: plan.successDescription,
+      observableResult: plan.observableResult,
+      minimumEvidenceLevel,
+      milestone: milestone ? {
+        id: milestone.id,
+        title: milestone.title,
+        successCriteria: milestone.successCriteria,
+        standardAssessment: milestone.standardAssessment,
+        evidenceAvailability: milestone.evidenceAvailability,
+        reviewNote: milestone.reviewNote,
+        evidenceRequirement: milestone.evidenceRequirement,
+      } : null,
+      evidenceRequirements: plan.evidenceRequirements,
+      reviewCycleDays: plan.reviewCycleDays,
+    };
+    const id = randomUUID();
+    const status: GoalPlanEvaluation['status'] = review.status === '证据不足' ? 'insufficient' : 'pending_confirmation';
+    database.prepare(`INSERT INTO goal_plan_evaluations
+      (id,goal_plan_id,contract_version_id,rule_snapshot_json,outcome,status,summary,reasons_json,milestone_id,evidence_ids_json,
+       evidence_snapshots_json,observed_at,evaluated_at,confirmed_at,assessment_source)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,'caller_supplied')`)
+      .run(id, goalPlanId, contractVersion.id, JSON.stringify(ruleSnapshot), outcome, status, summary, JSON.stringify(reasons), milestoneId,
+        JSON.stringify(evidenceIds), JSON.stringify(evidenceSnapshots), observedAt, now);
+    database.exec('COMMIT');
+    inTransaction = false;
+    const row = database.prepare(`${goalPlanEvaluationSelect} WHERE e.id=?`).get(id) as GoalPlanEvaluationRow;
+    return evaluationFromRow(row);
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export function listGoalPlanEvaluations(goalPlanId: string): GoalPlanEvaluation[] {
+  const database = ensureSchema();
+  try {
+    return (database.prepare(`${goalPlanEvaluationSelect} WHERE e.goal_plan_id=? ORDER BY e.evaluated_at,e.id`).all(goalPlanId) as GoalPlanEvaluationRow[])
+      .map(evaluationFromRow);
+  } finally {
+    database.close();
+  }
+}
+
+export function confirmGoalPlanEvaluation(goalPlanId: string, evaluationId: string, input: unknown): GoalPlanEvaluation {
+  const request = object(input, '进展确认');
+  if (request.confirmed !== true) throw new Error('需要单独确认目标进展');
+  const now = new Date().toISOString();
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const evaluation = database.prepare(`SELECT status FROM goal_plan_evaluations WHERE id=? AND goal_plan_id=?`)
+      .get(evaluationId, goalPlanId) as { status: GoalPlanEvaluation['status'] } | undefined;
+    if (!evaluation || evaluation.status !== 'pending_confirmation') throw new Error('找不到待确认的目标进展评价');
+    const goal = database.prepare('SELECT status FROM goal_plans WHERE id=?').get(goalPlanId) as { status: GoalPlanStatus } | undefined;
+    if (!goal) throw new Error('找不到对应目标');
+    database.prepare("UPDATE goal_plan_evaluations SET status='confirmed',confirmed_at=? WHERE id=?").run(now, evaluationId);
+    appendEvent(database, goalPlanId, goal.status, goal.status, 'progress_confirmed', `确认进展评价 ${evaluationId}`, null, now);
+    database.exec('COMMIT');
+    inTransaction = false;
+    const row = database.prepare(`${goalPlanEvaluationSelect} WHERE e.id=?`).get(evaluationId) as GoalPlanEvaluationRow;
+    return evaluationFromRow(row);
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
   } finally {
     database.close();
   }
@@ -1342,7 +1966,11 @@ export function activateGoalPlan(id: string): GoalPlan {
     const activatedAt = new Date().toISOString();
     database.prepare("UPDATE goal_plans SET status='active', updated_at=?, activated_at=?, lifecycle_reason=NULL WHERE id=?")
       .run(activatedAt, activatedAt, id);
-    appendEvent(database, id, 'draft', 'active', 'activated', null, null, activatedAt);
+    const eventId = appendEvent(database, id, 'draft', 'active', 'activated', null, null, activatedAt);
+    database.prepare(`INSERT INTO goal_plan_contract_versions
+      (id,goal_plan_id,version,effective_at,plan_json,change_summary,event_id,created_at)
+      VALUES (?,?,1,?,?,?, ?,?)`)
+      .run(randomUUID(), id, activatedAt, JSON.stringify(plan), '目标初始契约', eventId, activatedAt);
     const concreteActions = plan.nextActions.filter(item => item.title && item.specificity === 'concrete');
     const taskIds = new Map(concreteActions.map(action => [action.id, `${id}:${action.id}`]));
     const insertAction = database.prepare(`INSERT INTO goal_plan_actions
