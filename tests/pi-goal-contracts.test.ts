@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { getGoalDomainTemplate } from '../lib/goal-domain-templates';
 
 const typeboxStub = {
   Optional: (value: unknown) => value,
@@ -31,6 +32,19 @@ const pendingChange = {
     reviewCycleDays: 7, milestones: [], evidenceRequirements: [], nextActions: [], sourceIntent: '学习英语',
   },
   createdAt: '2026-11-12T00:00:00.000Z', updatedAt: '2026-11-12T00:00:00.000Z', resolvedAt: null,
+};
+
+const template = getGoalDomainTemplate('learning', '1.0.0');
+const completeDraft = {
+  id: 'draft-1', status: 'draft', updatedAt: '2026-11-12T00:00:00.000Z', validation: { ready: true, issues: [] },
+  sourceIntent: '我想学英语', title: '英语表达', domain: 'learning', domainTemplate: template,
+  context: '工作会议', successDescription: '能主持英文会议。', observableResult: '保存完整录音和反馈。',
+  baselineStatus: 'to_measure', baselineAction: '录制一段英文项目介绍。',
+  constraints: { status: 'confirmed', items: ['每晚最多 30 分钟'] },
+  milestones: [{ id: 'milestone-1', title: '完成基线', stage: 'near', successCriteria: '保存一段 3 分钟录音。', standardAssessment: 'reasonable', evidenceAvailability: 'available', reviewNote: '录音可复听。', evidenceRequirement: '完整录音（E2）。' }],
+  nextActions: [{ id: 'action-1', title: '录制英文项目介绍', estimateMinutes: 20, priority: 'medium', specificity: 'concrete', dependsOn: [] }],
+  evidenceRequirements: [{ id: 'evidence-1', item: '口语基线', description: '保存完整录音。', minimumLevel: 'E2' }],
+  reviewCycleDays: 7, lifecycleEvents: [], pendingCompletion: null, contractVersion: null,
 };
 
 function createGoalTool() {
@@ -114,5 +128,56 @@ describe('pi 目标契约变更确认', () => {
     expect(output).toContain('evidence-1 · E2');
     expect(output).toContain('回答至少 3 个现场问题');
     expect(output).toContain('会议录音：保存完整录音。（最低 E2）');
+  });
+
+  it('列出模板时展示来源、适用条件和版本，并让用户选择后再存草稿', async () => {
+    const tool = createGoalTool();
+    const fetchMock = vi.fn(async (_url: string, options?: RequestInit) => {
+      if (options?.method === 'POST' || options?.method === 'PATCH') return response({ plan: completeDraft });
+      if (_url.includes('/goal-domain-templates')) return response({ templates: [template] });
+      return response({ plans: [completeDraft] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const listed = await tool.execute('templates', { action: 'list_templates' }, undefined, undefined, { hasUI: false });
+    expect(listed.content[0].text).toContain('学习目标模板 · v1.0.0');
+    expect(listed.content[0].text).toContain('https://doi.org/10.1177/1529100612453266');
+    expect(listed.content[0].text).toContain('适用条件');
+    expect(listed.content[0].text).toContain('请向用户展示');
+
+    const rejected = await tool.execute('missing-template', { action: 'save_draft', plan: { title: '英语表达' } }, undefined, undefined, { hasUI: false });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.content[0].text).toContain('list_templates');
+
+    const saved = await tool.execute('save-template', { action: 'save_draft', plan: { domain: 'learning', domainTemplate: { id: 'learning', version: '1.0.0' } } }, undefined, undefined, { hasUI: false });
+    expect(saved.content[0].text).toContain('学习目标模板 · v1.0.0');
+    expect(saved.content[0].text).toContain('BuildYourself MVP PRD');
+  });
+
+  it('启用对话框展示完整计划、评价标准、行动和模板依据', async () => {
+    const tool = createGoalTool();
+    const fetchMock = vi.fn(async (_url: string, options?: RequestInit) => options?.method === 'POST'
+      ? response({ plan: { ...completeDraft, status: 'active' } })
+      : response({ plans: [completeDraft] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const confirm = vi.fn(async (_title: string, message: string) => {
+      expect(message).toContain('保存一段 3 分钟录音');
+      expect(message).toContain('录制英文项目介绍');
+      expect(message).toContain('学习目标模板 · v1.0.0');
+      expect(message).toContain('https://doi.org/10.1177/1529100612453266');
+      expect(message).toContain('使用边界');
+      return true;
+    });
+
+    const activated = await tool.execute('activate', { action: 'activate', draftId: 'draft-1' }, undefined, undefined, {
+      hasUI: true, ui: { confirm },
+    });
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body))).toMatchObject({
+      confirmed: true,
+      reviewedAt: completeDraft.updatedAt,
+    });
+    expect(activated.content[0].text).toContain('近期行动已进入待排池');
   });
 });

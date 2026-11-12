@@ -18,6 +18,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 function completePlan() {
   return {
     sourceIntent: '提升工作英语表达', title: '英语目标', domain: 'learning' as const, context: '工作会议',
+    domainTemplate: { id: 'learning', version: '1.0.0' },
     successDescription: '能主持英文会议。', observableResult: '保存会议录音。',
     baselineStatus: 'known' as const, baselineAction: null,
     milestones: [{ title: '主持会议', stage: 'near' as const, successCriteria: '主持一次会议。', standardAssessment: 'reasonable' as const, evidenceAvailability: 'available' as const, reviewNote: '检查录音。', evidenceRequirement: '会议录音' }],
@@ -30,7 +31,7 @@ function completePlan() {
 describe('历史日历中的已保存复盘', () => {
   it('保留保存时复盘和结论，标记被引用证据的后续更正，并提供最近判定入口', async () => {
     const plan = saveGoalPlanDraft(completePlan());
-    activateGoalPlan(plan.id);
+    activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt });
     const action = listGoalPlanActions(plan.id)[0];
     const evidence = saveEvidence({
       text: '原始录音反馈', source: '导师', reference: 'review-audio-v1', observedAt: '2026-11-10T10:00:00.000Z',
@@ -102,7 +103,7 @@ describe('历史日历中的已保存复盘', () => {
     vi.setSystemTime(new Date('2026-11-16T00:30:00.000Z'));
     try {
       const plan = saveGoalPlanDraft(completePlan());
-      activateGoalPlan(plan.id);
+      activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt });
       const weekStart = '2026-11-09';
       const draft = getWeeklyReview(weekStart, 'America/Los_Angeles');
       const saved = saveWeeklyReview(weekStart, draft.review.adjustment, 'America/Los_Angeles');
@@ -134,7 +135,7 @@ describe('历史日历中的已保存复盘', () => {
 
   it('旧复盘缺少保存时间时列入日期不详，不推测日期', async () => {
     const plan = saveGoalPlanDraft(completePlan());
-    activateGoalPlan(plan.id);
+    activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt });
     const weekStart = '2026-11-09';
     const draft = getWeeklyReview(weekStart, 'UTC');
     saveWeeklyReview(weekStart, draft.review.adjustment, 'UTC');
@@ -156,7 +157,7 @@ describe('历史日历中的已保存复盘', () => {
     vi.setSystemTime(new Date('2026-11-12T12:00:00.000Z'));
     try {
       const plan = saveGoalPlanDraft(completePlan());
-      activateGoalPlan(plan.id);
+      activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt });
       const sourceWeek = '2026-11-09';
       const sourceDraft = getWeeklyReview(sourceWeek, 'UTC');
       expect(sourceDraft.review.adjustment.goalPlanId).toBe(plan.id);
@@ -209,7 +210,7 @@ describe('历史日历中的已保存复盘', () => {
     vi.setSystemTime(new Date('2026-11-12T12:00:00.000Z'));
     try {
       const plan = saveGoalPlanDraft(completePlan());
-      activateGoalPlan(plan.id);
+      activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt });
       const action = listGoalPlanActions(plan.id)[0];
       const evidence = saveEvidence({
         text: '复盘周之前的评价证据', source: '导师', reference: 'older-review-evidence', observedAt: '2026-11-03T10:00:00.000Z',
@@ -248,7 +249,7 @@ describe('历史日历中的已保存复盘', () => {
     vi.setSystemTime(new Date('2026-11-12T12:00:00.000Z'));
     try {
       const plan = saveGoalPlanDraft(completePlan());
-      activateGoalPlan(plan.id);
+      activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt });
       const action = listGoalPlanActions(plan.id)[0];
       const evidence = saveEvidence({
         text: '没有可恢复快照的证据', source: '用户', reference: 'legacy-evidence', observedAt: '2026-11-03T10:00:00.000Z',

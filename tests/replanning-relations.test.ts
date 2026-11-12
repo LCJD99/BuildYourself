@@ -13,13 +13,14 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 function activeGoal(title: string) {
   const draft = saveGoalPlanDraft({
-    sourceIntent: title, title, domain: 'general', successDescription: `${title}结果`, observableResult: `${title}交付`,
+    sourceIntent: title, title, domain: 'general', domainTemplate: { id: 'general', version: '1.0.0' },
+    successDescription: `${title}结果`, observableResult: `${title}交付`,
     baselineStatus: 'known', constraints: { status: 'confirmed', items: [] },
     milestones: [{ title: `${title}阶段`, stage: 'near', successCriteria: `${title}完成`, standardAssessment: 'reasonable', evidenceAvailability: 'available', reviewNote: '可核对', evidenceRequirement: '提交记录' }],
     nextActions: [{ id: 'action', title: `${title}行动`, estimateMinutes: 60, hardDeadline: null, specificity: 'concrete' }],
     evidenceRequirements: [{ item: '提交记录', description: '保存记录', minimumLevel: 'E2' }], reviewCycleDays: 7,
   });
-  activateGoalPlan(draft.id);
+  activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
   return listGoalPlanActions(draft.id)[0];
 }
 

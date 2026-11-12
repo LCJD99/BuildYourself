@@ -47,6 +47,7 @@ function createGoalPlan(minimumLevel: 'E2' | 'E3' = 'E2', successCriteria = '完
     sourceIntent: '改善服务响应延迟',
     title: '改善服务响应延迟',
     domain: 'project',
+    domainTemplate: { id: 'project', version: '1.0.0' },
     context: '服务性能调优',
     successDescription: successCriteria,
     observableResult: '保存完整基准报告并复测响应延迟。',
@@ -67,7 +68,7 @@ function createGoalPlan(minimumLevel: 'E2' | 'E3' = 'E2', successCriteria = '完
     evidenceRequirements: [{ id: 'benchmark-result', item: '基准结果', description: '保存完整报告。', minimumLevel }],
     reviewCycleDays: 7,
   });
-  activateGoalPlan(draft.id);
+  activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
   return draft.id;
 }
 

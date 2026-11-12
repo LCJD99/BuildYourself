@@ -12,6 +12,7 @@ import {
   transitionGoalPlan,
   updateGoalPlanDraft,
 } from '../lib/goal-plans';
+import { getGoalDomainTemplate } from '../lib/goal-domain-templates';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-goal-plans-'));
 beforeEach(() => { process.env.BUILDYOURSELF_DB = join(dir, `${randomUUID()}.sqlite`); });
@@ -22,6 +23,7 @@ function completePlan(overrides: Record<string, unknown> = {}) {
     sourceIntent: '我想学英语',
     title: '能用英语完成工作场景沟通',
     domain: 'learning',
+    domainTemplate: { id: 'learning', version: '1.0.0' },
     context: '工作会议和跨团队协作',
     successDescription: '能独立主持一次 10 分钟的英文项目同步。',
     observableResult: '录制一次完整英文同步，并由英语导师按清晰度和互动能力给出反馈。',
@@ -71,6 +73,7 @@ describe('目标计划草稿与激活', () => {
     expect(saved.status).toBe('draft');
     expect(saved.validation.ready).toBe(false);
     expect(saved.validation.issues).toContain('需要写明可观察的结果或能力表现。');
+    expect(saved.validation.issues).toContain('需要选择并记录带版本和来源的领域模板；其他领域可选择通用模板。');
     expect(listPendingGoalActions()).toEqual([]);
     expect(listGoalPlans()).toHaveLength(1);
   });
@@ -80,7 +83,7 @@ describe('目标计划草稿与激活', () => {
     expect(draft.validation.ready).toBe(true);
     expect(listPendingGoalActions()).toEqual([]);
 
-    const activated = activateGoalPlan(draft.id);
+    const activated = activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
 
     expect(activated.status).toBe('active');
     expect(activated.activatedAt).toBeTruthy();
@@ -96,21 +99,56 @@ describe('目标计划草稿与激活', () => {
     expect(listGoalPlans()[0].status).toBe('active');
   });
 
+  it('拒绝绕过界面启用未选择版本化领域模板的草稿', () => {
+    const draft = saveGoalPlanDraft(completePlan({ domainTemplate: null }));
+
+    expect(draft.validation.ready).toBe(false);
+    expect(() => activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt })).toThrow('需要选择并记录带版本和来源的领域模板');
+    expect(listGoalPlans()[0].status).toBe('draft');
+    expect(listPendingGoalActions()).toEqual([]);
+  });
+
+  it('激活需要明确确认且确认的是当前草稿版本，不能只提交布尔值或确认过期内容', () => {
+    const draft = saveGoalPlanDraft(completePlan());
+    const approved = { confirmed: true, reviewedAt: draft.updatedAt };
+
+    expect(() => activateGoalPlan(draft.id, { confirmed: true, reviewedAt: '2026-01-01T00:00:00.000Z' }))
+      .toThrow('目标内容已变化，请重新核对');
+    expect(listGoalPlans()[0].status).toBe('draft');
+
+    expect(() => activateGoalPlan(draft.id, { confirmed: false, reviewedAt: draft.updatedAt }))
+      .toThrow('需要用户明确确认');
+    expect(listGoalPlans()[0].status).toBe('draft');
+
+    expect(activateGoalPlan(draft.id, approved).status).toBe('active');
+  });
+
   it('编辑草稿时保留未改动的契约字段', () => {
     const draft = saveGoalPlanDraft(completePlan());
     const updated = updateGoalPlanDraft(draft.id, { title: '能主持英文项目同步' });
 
     expect(updated.title).toBe('能主持英文项目同步');
+    expect(updated.domainTemplate).toMatchObject({ id: 'learning', version: '1.0.0', title: '学习目标模板' });
     expect(updated.successDescription).toBe('能独立主持一次 10 分钟的英文项目同步。');
     expect(updated.milestones).toHaveLength(2);
     expect(updated.nextActions[0].title).toBe('录制 3 分钟英文项目介绍');
     expect(updated.validation.ready).toBe(true);
   });
 
+  it('其他领域使用通用模板完成同一流程并保留版本化依据', () => {
+    const draft = saveGoalPlanDraft(completePlan({ title: '整理家庭照片', domain: 'general', domainTemplate: { id: 'general', version: '1.0.0' } }));
+    expect(draft.validation.ready).toBe(true);
+    expect(draft.domainTemplate).toEqual(getGoalDomainTemplate('general', '1.0.0'));
+    expect(draft.domainTemplate?.sourceReferences[0]?.url).toContain('MVP-PRD-v0.1.md');
+
+    activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
+    expect(listPendingGoalActions()).toMatchObject([{ goalPlanId: draft.id, title: '录制 3 分钟英文项目介绍' }]);
+  });
+
   it('拒绝激活契约不完整的草稿，并保持它退出自动规划', () => {
     const draft = saveGoalPlanDraft(completePlan({ observableResult: '', baselineAction: '' }));
 
-    expect(() => activateGoalPlan(draft.id)).toThrow('目标契约尚未通过校验');
+    expect(() => activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt })).toThrow('目标契约尚未通过校验');
     expect(listGoalPlans()[0].status).toBe('draft');
     expect(listPendingGoalActions()).toEqual([]);
   });
@@ -155,18 +193,18 @@ describe('目标计划草稿与激活', () => {
   it('达到 10 个活跃目标后拒绝新增启用，但保留草稿', () => {
     for (let index = 0; index < 10; index += 1) {
       const draft = saveGoalPlanDraft(completePlan({ title: `目标 ${index + 1}` }));
-      activateGoalPlan(draft.id);
+      activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
     }
     const extra = saveGoalPlanDraft(completePlan({ title: '第十一个目标' }));
 
-    expect(() => activateGoalPlan(extra.id)).toThrow('活跃目标已达到 10 个');
+    expect(() => activateGoalPlan(extra.id, { confirmed: true, reviewedAt: extra.updatedAt })).toThrow('活跃目标已达到 10 个');
     expect(listGoalPlans().find(plan => plan.id === extra.id)?.status).toBe('draft');
     expect(listPendingGoalActions()).toHaveLength(10);
   });
 
   it('暂停目标会保留历史待办并退出待排池，恢复时重新占用活跃名额', () => {
     const draft = saveGoalPlanDraft(completePlan());
-    activateGoalPlan(draft.id);
+    activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
 
     const paused = transitionGoalPlan(draft.id, { action: 'pause', reason: '本周优先处理项目交付' });
 
@@ -182,8 +220,8 @@ describe('目标计划草稿与激活', () => {
   it('归档与放弃都要求原因并留下可回查的终态记录', () => {
     const archived = saveGoalPlanDraft(completePlan());
     const abandoned = saveGoalPlanDraft(completePlan({ title: '放弃目标' }));
-    activateGoalPlan(archived.id);
-    activateGoalPlan(abandoned.id);
+    activateGoalPlan(archived.id, { confirmed: true, reviewedAt: archived.updatedAt });
+    activateGoalPlan(abandoned.id, { confirmed: true, reviewedAt: abandoned.updatedAt });
 
     expect(() => transitionGoalPlan(archived.id, { action: 'archive', reason: '  ' })).toThrow('请填写归档原因');
     expect(transitionGoalPlan(archived.id, { action: 'archive', reason: '目标方向已变化' })).toMatchObject({
@@ -199,7 +237,7 @@ describe('目标计划草稿与激活', () => {
 
   it('完成请求必须满足每项证据等级并等待单独确认', () => {
     const draft = saveGoalPlanDraft(completePlan());
-    activateGoalPlan(draft.id);
+    activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
     const requirement = draft.evidenceRequirements[0];
     const evidence = [{ requirementId: requirement.id, description: '录音文件：baseline.mp3', level: 'E2' }];
 
@@ -222,10 +260,10 @@ describe('目标计划草稿与激活', () => {
 
   it('暂停后释放的名额可被新目标占用，满额时不能恢复旧目标', () => {
     const plans = Array.from({ length: 10 }, (_, index) => saveGoalPlanDraft(completePlan({ title: `目标 ${index + 1}` })));
-    plans.forEach(plan => activateGoalPlan(plan.id));
+    plans.forEach(plan => activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt }));
     transitionGoalPlan(plans[0].id, { action: 'pause' });
     const replacement = saveGoalPlanDraft(completePlan({ title: '替补目标' }));
-    activateGoalPlan(replacement.id);
+    activateGoalPlan(replacement.id, { confirmed: true, reviewedAt: replacement.updatedAt });
 
     expect(() => transitionGoalPlan(plans[0].id, { action: 'resume' })).toThrow('活跃目标已达到 10 个');
     expect(listPendingGoalActions()).toHaveLength(10);

@@ -17,6 +17,7 @@ function completePlan() {
     sourceIntent: '我想完成课程展示',
     title: '完成英语课程展示',
     domain: 'learning',
+    domainTemplate: { id: 'learning', version: '1.0.0' },
     successDescription: '完成一次可核对的英文展示。',
     observableResult: '提交展示录像和课程平台反馈。',
     baselineStatus: 'known',
@@ -35,7 +36,7 @@ function completePlan() {
 describe('组合总览接口', () => {
   it('返回摘要、单目标工作区和详情共用的真实目标、行动、证据及评价', async () => {
     const draft = saveGoalPlanDraft(completePlan());
-    const goal = activateGoalPlan(draft.id);
+    const goal = activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
     const action = (await (await GET()).json()).actions[0];
     const evidence = saveEvidence({
       text: '课程平台已收到展示录像。', source: '课程平台', reference: '课程反馈-1',

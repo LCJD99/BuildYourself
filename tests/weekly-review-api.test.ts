@@ -44,7 +44,8 @@ describe('周复盘 API', () => {
 
   it('确认已保存建议后返回关联到里程碑的待排任务', async () => {
     const draft = saveGoalPlanDraft({
-      sourceIntent: '改善响应延迟', title: '改善响应延迟', domain: 'project', context: '性能验证',
+      sourceIntent: '改善响应延迟', title: '改善响应延迟', domain: 'project',
+      domainTemplate: { id: 'project', version: '1.0.0' }, context: '性能验证',
       successDescription: '响应延迟低于 200 ms', observableResult: '完整基准报告', baselineStatus: 'known',
       baselineAction: '运行完整基准测试',
       milestones: [{ id: 'latency', title: '响应延迟达标', stage: 'near', successCriteria: '完整基准测试响应延迟低于 200 ms',
@@ -55,7 +56,7 @@ describe('周复盘 API', () => {
       evidenceRequirements: [{ id: 'report', item: '基准报告', description: '提交完整报告', minimumLevel: 'E2' }],
       reviewCycleDays: 7,
     });
-    activateGoalPlan(draft.id);
+    activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
     const weekStart = '2026-11-09';
     const reviewResponse = GET(new Request(`http://localhost/api/weekly-review?weekStart=${weekStart}&timeZone=UTC`));
     const review = await reviewResponse.json();

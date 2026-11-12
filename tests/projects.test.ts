@@ -20,6 +20,7 @@ function activePlan(title: string) {
     sourceIntent: title,
     title,
     domain: 'project',
+    domainTemplate: { id: 'project', version: '1.0.0' },
     context: null,
     successDescription: '交付一项可核验成果。',
     observableResult: '提交并核对成果。',
@@ -31,7 +32,7 @@ function activePlan(title: string) {
     evidenceRequirements: [{ id: randomUUID(), item: '成果', description: '提交可核验材料。', minimumLevel: 'E2' }],
     reviewCycleDays: 7,
   });
-  activateGoalPlan(plan.id);
+  activateGoalPlan(plan.id, { confirmed: true, reviewedAt: plan.updatedAt });
   return plan;
 }
 

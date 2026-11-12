@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEvaluation, GoalPlanEventAction, GoalPlanStatus, GoalProject, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
+import { describeGoalTemplateReview } from '@/lib/goal-template-review';
 import type { Evidence } from '@/lib/model';
 import type { TaskChangeEvent } from '@/lib/milestone-store';
 import type { ExternalCommitment } from '@/lib/commitments';
@@ -184,13 +185,19 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId, selec
   }
 
   async function activate(plan: GoalPlan) {
-    if (!window.confirm(`确认启用「${plan.title}」？启用后，具体近期行动将进入待排池。`)) return;
+    const review = describeGoalTemplateReview(plan);
+    const confirmedStandards = window.confirm(`请核对「${plan.title || '未命名目标'}」的评价标准与证据要求。\n\n${review.criteria}\n\n${review.evidence}\n\n确认这些标准与证据要求反映你的意图？`);
+    if (!confirmedStandards) return;
+    const confirmedActions = window.confirm(`请核对「${plan.title || '未命名目标'}」的近期行动。\n\n${review.actions}\n\n确认这些行动反映你的意图？`);
+    if (!confirmedActions) return;
+    const confirmedTemplate = window.confirm(`请核对领域模板、来源、适用条件和版本。\n\n${review.template}\n\n知识来源：\n${review.sources}\n\n${review.plan}\n\n确认启用后，具体近期行动将进入待排池。`);
+    if (!confirmedTemplate) return;
     setBusyId(plan.id);
     try {
       const response = await fetch(`/api/goal-plans/${encodeURIComponent(plan.id)}/activate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirmed: true }),
+        body: JSON.stringify({ confirmed: true, reviewedAt: plan.updatedAt }),
       });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error || '无法启用目标');
@@ -724,6 +731,30 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId, selec
             </button>
           </div>
           <p className="goal-intent">原始意图：{plan.sourceIntent || '尚未记录'}</p>
+          <section className="goal-template-review" aria-label={`${plan.title || '未命名目标'}的领域模板依据`}>
+            {plan.domainTemplate ? <>
+              <div className="goal-template-heading">
+                <strong>{plan.domainTemplate.title} · v{plan.domainTemplate.version}</strong>
+                <span>关注：{plan.domainTemplate.outcomeDimensions.join('、')}</span>
+              </div>
+              <p>{plan.domainTemplate.summary}</p>
+              <details>
+                <summary>查看适用条件、使用边界和知识来源</summary>
+                <div className="goal-template-details">
+                  <h5>适用条件</h5><ul>{plan.domainTemplate.applicabilityConditions.map(condition => <li key={condition}>{condition}</li>)}</ul>
+                  <h5>使用边界</h5><ul>{plan.domainTemplate.limitations.map(limitation => <li key={limitation}>{limitation}</li>)}</ul>
+                  <h5>知识来源、版本与支持范围</h5>
+                  <ul className="goal-template-sources">{plan.domainTemplate.sourceReferences.map(source => <li key={source.id}>
+                    <a href={source.url} target="_blank" rel="noreferrer">{source.title}</a>
+                    <small>{source.authors} · {source.version}</small>
+                    <p>支持：{source.supports}</p>
+                    <p>适用：{source.applicability}</p>
+                    <p>边界：{source.limitations}</p>
+                  </li>)}</ul>
+                </div>
+              </details>
+            </> : <p>此旧草稿未记录领域模板版本或来源；请在 pi 中选择模板后再确认计划。</p>}
+          </section>
           {!plan.validation.ready && (
             <div className="goal-validation"><strong>还需要补充或核对</strong><ul>{plan.validation.issues.map(issue => <li key={issue}>{issue}</li>)}</ul></div>
           )}

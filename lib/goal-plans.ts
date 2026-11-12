@@ -5,8 +5,9 @@ import type { Evidence } from './model';
 import { qualitativeMilestoneReview } from './milestone-review';
 import { recordTaskChange } from './milestone-store';
 import type { ActionPriority } from './daily-planner';
+import { getGoalDomainTemplate, type GoalDomain, type GoalDomainTemplate, type GoalDomainTemplateSource } from './goal-domain-templates';
 
-export type GoalDomain = 'learning' | 'fitness' | 'project' | 'general';
+export type { GoalDomain };
 export type GoalPlanStatus = 'draft' | 'active' | 'paused' | 'completed' | 'archived' | 'abandoned';
 export type MilestoneStage = 'near' | 'future';
 export type StandardAssessment = 'reasonable' | 'provisional' | 'needs_revision';
@@ -41,6 +42,7 @@ export type GoalPlanDraft = {
   sourceIntent: string | null;
   title: string | null;
   domain: GoalDomain;
+  domainTemplate: GoalDomainTemplate | null;
   context: string | null;
   successDescription: string | null;
   observableResult: string | null;
@@ -233,7 +235,69 @@ function list(value: unknown, field: string): unknown[] {
   return value;
 }
 
-function normalizeDraft(input: unknown): GoalPlanDraft {
+function textList(value: unknown, field: string): string[] {
+  return list(value, field).map((entry, index) => {
+    const text = nullableText(entry, `${field} ${index + 1}`);
+    if (!text) throw new Error(`${field} ${index + 1} 不能为空`);
+    return text;
+  });
+}
+
+function normalizeStoredTemplateSource(value: unknown, index: number): GoalDomainTemplateSource {
+  const source = object(value, `领域模板来源 ${index + 1}`);
+  const requiredText = (field: string, limit = 2000) => {
+    const text = nullableText(source[field], `领域模板来源 ${index + 1} ${field}`, limit);
+    if (!text) throw new Error(`领域模板来源 ${index + 1} 缺少 ${field}`);
+    return text;
+  };
+  const url = requiredText('url', 2000);
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new Error(`领域模板来源 ${index + 1} URL 无效`);
+  }
+  if (parsedUrl.protocol !== 'https:') throw new Error(`领域模板来源 ${index + 1} URL 必须使用 HTTPS`);
+  return {
+    id: requiredText('id', 100),
+    title: requiredText('title', 240),
+    authors: requiredText('authors', 500),
+    version: requiredText('version', 500),
+    url: parsedUrl.toString(),
+    supports: requiredText('supports'),
+    applicability: requiredText('applicability'),
+    limitations: requiredText('limitations'),
+  };
+}
+
+function normalizeStoredDomainTemplate(value: Record<string, unknown>, domain: GoalDomain): GoalDomainTemplate {
+  const id = nullableText(value.id, '领域模板 ID', 100);
+  if (!id || !domains.has(id as GoalDomain)) throw new Error('领域模板 ID 无效');
+  const templateDomain = choice(value.domain, domains, id as GoalDomain, '模板领域');
+  if (templateDomain !== domain) throw new Error('模板领域与目标领域不一致');
+  const requiredText = (field: string, limit = 2000) => {
+    const text = nullableText(value[field], `领域模板 ${field}`, limit);
+    if (!text) throw new Error(`领域模板缺少 ${field}`);
+    return text;
+  };
+  return {
+    id: id as GoalDomain,
+    version: requiredText('version', 100),
+    domain: templateDomain,
+    title: requiredText('title', 240),
+    summary: requiredText('summary'),
+    applicabilityConditions: textList(value.applicabilityConditions, '模板适用条件'),
+    limitations: textList(value.limitations, '模板使用边界'),
+    outcomeDimensions: textList(value.outcomeDimensions, '模板关注维度'),
+    milestoneGuidance: textList(value.milestoneGuidance, '模板阶段建议'),
+    actionGuidance: textList(value.actionGuidance, '模板行动建议'),
+    evidenceGuidance: textList(value.evidenceGuidance, '模板证据建议'),
+    reviewQuestions: textList(value.reviewQuestions, '模板复盘问题'),
+    sourceReferences: list(value.sourceReferences, '模板知识来源').map(normalizeStoredTemplateSource),
+  };
+}
+
+function normalizeDraft(input: unknown, templateMode: 'registry' | 'snapshot' = 'registry'): GoalPlanDraft {
   const value = object(input, '目标计划');
   const milestones = list(value.milestones, '里程碑').map((entry, index): GoalMilestone => {
     const item = object(entry, `里程碑 ${index + 1}`);
@@ -302,10 +366,26 @@ function normalizeDraft(input: unknown): GoalPlanDraft {
     throw new Error('复盘周期必须是 1 到 3650 天的整数');
   }
 
+  const domain = choice(value.domain, domains, 'general', '目标模板');
+  const domainTemplateInput = value.domainTemplate === undefined || value.domainTemplate === null
+    ? null : object(value.domainTemplate, '领域模板');
+  const templateId = nullableText(domainTemplateInput?.id, '领域模板 ID', 100);
+  const templateVersion = nullableText(domainTemplateInput?.version, '领域模板版本', 100);
+  if ((templateId === null) !== (templateVersion === null)) throw new Error('领域模板需要同时提供 ID 和版本。');
+  const domainTemplate = domainTemplateInput && templateMode === 'snapshot'
+    && Array.isArray(domainTemplateInput.sourceReferences)
+    ? normalizeStoredDomainTemplate(domainTemplateInput, domain)
+    : templateId && templateVersion
+      ? getGoalDomainTemplate(templateId, templateVersion)
+      : null;
+  if (templateId && !domainTemplate) throw new Error('找不到该领域模板版本。');
+  if (domainTemplate && domainTemplate.domain !== domain) throw new Error('模板领域与目标领域不一致。');
+
   return {
     sourceIntent: nullableText(value.sourceIntent, '原始意图', 1000),
     title: nullableText(value.title, '目标名称', 240),
-    domain: choice(value.domain, domains, 'general', '目标模板'),
+    domain,
+    domainTemplate,
     context: nullableText(value.context, '使用场景'),
     successDescription: nullableText(value.successDescription, '成功描述'),
     observableResult: nullableText(value.observableResult, '可观察结果'),
@@ -325,6 +405,8 @@ export function validateGoalPlan(plan: GoalPlanDraft): GoalPlanValidation {
   if (!plan.title) issues.push('需要填写目标名称。');
   if (!plan.successDescription) issues.push('需要说明怎样算达到目标。');
   if (!plan.observableResult) issues.push('需要写明可观察的结果或能力表现。');
+  if (plan.domainTemplate && plan.domainTemplate.domain !== plan.domain) issues.push('领域模板需要与目标领域一致。');
+  if (plan.domainTemplate && !plan.domainTemplate.sourceReferences.length) issues.push('领域模板需要记录可查看的知识来源。');
   if ((plan.baselineStatus === 'unknown' || plan.baselineStatus === 'to_measure') && !plan.baselineAction) {
     issues.push('当前水平未知，需要提出一次可执行的基线行动。');
   }
@@ -366,6 +448,12 @@ export function validateGoalPlan(plan: GoalPlanDraft): GoalPlanValidation {
     issues.push('需要至少一项写明对象、内容和最低等级的证据要求。');
   }
   return { ready: issues.length === 0, issues };
+}
+
+export function validateNewGoalPlan(plan: GoalPlanDraft): GoalPlanValidation {
+  const validation = validateGoalPlan(plan);
+  if (plan.domainTemplate) return validation;
+  return { ready: false, issues: [...validation.issues, '需要选择并记录带版本和来源的领域模板；其他领域可选择通用模板。'] };
 }
 
 const goalPlanStatuses = "'draft', 'active', 'paused', 'completed', 'archived', 'abandoned'";
@@ -708,8 +796,9 @@ function appendEvent(database: ReturnType<typeof openDatabase>, goalPlanId: stri
 }
 
 function toGoalPlan(row: GoalPlanRow, lifecycleEvents: GoalPlanEvent[] = [], pendingCompletion: PendingGoalCompletion | null = null, contractVersion: number | null = null): GoalPlan {
-  const plan = normalizeDraft(JSON.parse(row.plan_json));
-  return { ...plan, id: row.id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, activatedAt: row.activated_at, completedAt: row.completed_at, lifecycleReason: row.lifecycle_reason, lifecycleEvents, pendingCompletion, validation: validateGoalPlan(plan), contractVersion };
+  const plan = normalizeDraft(JSON.parse(row.plan_json), 'snapshot');
+  const validation = row.status === 'draft' ? validateNewGoalPlan(plan) : validateGoalPlan(plan);
+  return { ...plan, id: row.id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, activatedAt: row.activated_at, completedAt: row.completed_at, lifecycleReason: row.lifecycle_reason, lifecycleEvents, pendingCompletion, validation, contractVersion };
 }
 
 export function saveGoalPlanDraft(input: unknown): GoalPlan {
@@ -747,7 +836,7 @@ export function updateGoalPlanDraft(id: string, input: unknown): GoalPlan {
         ? previous.constraints
         : { ...previous.constraints, ...object(patch.constraints, '约束') },
     };
-    const plan = normalizeDraft(merged);
+    const plan = normalizeDraft(merged, Object.hasOwn(patch, 'domainTemplate') ? 'registry' : 'snapshot');
     const result = database.prepare("UPDATE goal_plans SET source_intent=?, plan_json=?, updated_at=? WHERE id=? AND status='draft'")
       .run(plan.sourceIntent ?? '', JSON.stringify(plan), now, id);
     if (Number(result.changes) !== 1) throw new Error('找不到可编辑的目标草稿');
@@ -809,7 +898,7 @@ function contractVersionFromRow(row: GoalPlanContractVersionRow): GoalPlanContra
     createdAt: row.created_at,
     changeSummary: row.change_summary,
     eventId: row.event_id,
-    plan: normalizeDraft(JSON.parse(row.plan_json)),
+    plan: normalizeDraft(JSON.parse(row.plan_json), 'snapshot'),
   };
 }
 
@@ -872,6 +961,7 @@ function inheritContractItemIds(entries: unknown[], previous: Array<{ id: string
 const contractChangeFields: Array<{ key: keyof GoalPlanDraft; label: string }> = [
   { key: 'title', label: '目标名称' },
   { key: 'domain', label: '目标领域' },
+  { key: 'domainTemplate', label: '领域模板与依据' },
   { key: 'context', label: '使用场景' },
   { key: 'successDescription', label: '成功描述' },
   { key: 'observableResult', label: '可观察结果' },
@@ -901,7 +991,7 @@ function normalizeContractChangePlan(previous: GoalPlanDraft, input: unknown) {
       ? previous.constraints
       : { ...previous.constraints, ...object(patch.constraints, '约束') },
   };
-  const plan = normalizeDraft(merged);
+  const plan = normalizeDraft(merged, Object.hasOwn(patch, 'domainTemplate') ? 'registry' : 'snapshot');
   const validation = validateGoalPlan(plan);
   if (!validation.ready) throw new Error(`目标契约变更未通过校验：${validation.issues.join(' ')}`);
   const changedFields = contractChangeFields
@@ -941,8 +1031,8 @@ function contractChangeFromRow(row: GoalPlanContractChangeRow): GoalPlanContract
     status: row.status,
     summary: row.summary,
     changedFields,
-    previousPlan: normalizeDraft(JSON.parse(row.previous_plan_json)),
-    proposedPlan: normalizeDraft(JSON.parse(row.proposed_plan_json)),
+    previousPlan: normalizeDraft(JSON.parse(row.previous_plan_json), 'snapshot'),
+    proposedPlan: normalizeDraft(JSON.parse(row.proposed_plan_json), 'snapshot'),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     resolvedAt: row.resolved_at,
@@ -978,7 +1068,7 @@ export function createGoalPlanContractChange(goalPlanId: string, input: unknown)
     if (database.prepare("SELECT 1 FROM goal_plan_contract_changes WHERE goal_plan_id=? AND status='pending_review'").get(goalPlanId)) {
       throw new Error('该目标已有待确认的契约变更，请先查看或编辑现有提议');
     }
-    const previousPlan = normalizeDraft(JSON.parse(goal.plan_json));
+    const previousPlan = normalizeDraft(JSON.parse(goal.plan_json), 'snapshot');
     const candidate = normalizeContractChangePlan(previousPlan, input);
     const id = randomUUID();
     database.prepare(`INSERT INTO goal_plan_contract_changes
@@ -1008,7 +1098,7 @@ export function editGoalPlanContractChange(goalPlanId: string, changeId: string,
     if (!row) throw new Error('找不到待确认的目标契约变更');
     const current = currentContractVersion(database, goalPlanId);
     if (!current || current.version !== Number(row.base_version)) throw new Error('目标契约已变化，请基于当前版本重新提出变更');
-    const candidate = normalizeContractChangePlan(normalizeDraft(JSON.parse(row.previous_plan_json)), input);
+    const candidate = normalizeContractChangePlan(normalizeDraft(JSON.parse(row.previous_plan_json), 'snapshot'), input);
     database.prepare(`UPDATE goal_plan_contract_changes SET proposed_plan_json=?,changed_fields_json=?,summary=?,updated_at=? WHERE id=?`)
       .run(JSON.stringify(candidate.plan), JSON.stringify(candidate.changedFields), candidate.summary, now, changeId);
     database.exec('COMMIT');
@@ -1046,7 +1136,7 @@ export function resolveGoalPlanContractChange(goalPlanId: string, changeId: stri
     }
     const current = currentContractVersion(database, goalPlanId);
     if (!current || current.version !== Number(change.base_version)) throw new Error('目标契约已变化，请查看并确认基于最新版本的变更');
-    const proposedPlan = normalizeDraft(JSON.parse(change.proposed_plan_json));
+    const proposedPlan = normalizeDraft(JSON.parse(change.proposed_plan_json), 'snapshot');
     const validation = validateGoalPlan(proposedPlan);
     if (!validation.ready) throw new Error(`目标契约变更未通过校验：${validation.issues.join(' ')}`);
     const eventId = appendEvent(database, goalPlanId, goal.status, goal.status, 'contract_changed', change.summary, null, now);
@@ -1874,7 +1964,7 @@ function createGoalPlanActionInternal(input: unknown, reviewWeekStart: string | 
     }
     const goalPlan = ensureActiveGoalPlan(database, goalPlanId);
     const planRow = database.prepare('SELECT plan_json FROM goal_plans WHERE id=?').get(goalPlan.id) as { plan_json: string };
-    if (milestoneId && !normalizeDraft(JSON.parse(planRow.plan_json)).milestones.some(milestone => milestone.id === milestoneId)) {
+    if (milestoneId && !normalizeDraft(JSON.parse(planRow.plan_json), 'snapshot').milestones.some(milestone => milestone.id === milestoneId)) {
       throw new Error('所选里程碑不属于该目标');
     }
     validateActionDependencies(database, goalPlan.id, id, action.dependencyIds);
@@ -1980,7 +2070,10 @@ export function markGoalPlanActionDone(id: string): GoalPlanAction {
   return listGoalPlanActions(goalPlanId).find(action => action.id === id)!;
 }
 
-export function activateGoalPlan(id: string): GoalPlan {
+export function activateGoalPlan(id: string, input: unknown): GoalPlan {
+  const request = object(input, '目标启用确认');
+  if (request.confirmed !== true) throw new Error('需要用户明确确认后才能启用目标。');
+  const reviewedAt = normalizeTimestamp(request.reviewedAt, '目标核对版本');
   const database = ensureSchema();
   let inTransaction = false;
   try {
@@ -1988,14 +2081,17 @@ export function activateGoalPlan(id: string): GoalPlan {
     inTransaction = true;
     const row = database.prepare('SELECT * FROM goal_plans WHERE id=?').get(id) as GoalPlanRow | undefined;
     if (!row) throw new Error('找不到目标草稿');
+    if (new Date(row.updated_at).toISOString() !== reviewedAt) {
+      throw new Error('目标内容已变化，请重新核对标准、证据、行动和模板来源后再启用。');
+    }
     if (row.status === 'active') {
       database.exec('COMMIT');
       inTransaction = false;
       return getGoalPlan(id)!;
     }
     if (row.status !== 'draft') throw new Error('只能启用目标草稿。');
-    const plan = JSON.parse(row.plan_json) as GoalPlanDraft;
-    const validation = validateGoalPlan(plan);
+    const plan = normalizeDraft(JSON.parse(row.plan_json), 'snapshot');
+    const validation = validateNewGoalPlan(plan);
     if (!validation.ready) throw new Error(`目标契约尚未通过校验：${validation.issues.join(' ')}`);
     const activeCount = database.prepare("SELECT COUNT(*) AS count FROM goal_plans WHERE status='active'").get() as { count: number };
     if (Number(activeCount.count) >= 10) throw new Error('活跃目标已达到 10 个，请先暂停、完成或归档一个目标。');

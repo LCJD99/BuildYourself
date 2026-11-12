@@ -15,6 +15,7 @@ function completePlan() {
     sourceIntent: '完成项目测试',
     title: '交付项目测试',
     domain: 'project',
+    domainTemplate: { id: 'project', version: '1.0.0' },
     successDescription: '完成并提交测试报告。',
     observableResult: '有一份可复核的报告。',
     baselineStatus: 'known',
@@ -35,7 +36,7 @@ function completePlan() {
 describe('周计划持久化', () => {
   it('保存行动元数据、容量草稿，并在确认后恢复同一计划', () => {
     const draft = saveGoalPlanDraft(completePlan());
-    activateGoalPlan(draft.id);
+    activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
 
     const generated = generateAndSaveDailyPlan('2026-11-09', { '2026-11-09': 60, '2026-11-10': 60 });
     expect(generated.days[0].actions[0]).toMatchObject({

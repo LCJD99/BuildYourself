@@ -26,14 +26,15 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 function activeGoal() {
   const draft = saveGoalPlanDraft({
-    sourceIntent: '完成项目', title: '完成项目', domain: 'project', context: '工作项目',
+    sourceIntent: '完成项目', title: '完成项目', domain: 'project', domainTemplate: { id: 'project', version: '1.0.0' },
+    context: '工作项目',
     successDescription: '完成项目交付。', observableResult: '通过验收的交付物。', baselineStatus: 'known',
     milestones: [{ title: '完成交付', stage: 'near', successCriteria: '交付物通过验收。', standardAssessment: 'reasonable', evidenceAvailability: 'available', reviewNote: '验收记录可查。', evidenceRequirement: '验收记录' }],
     nextActions: [{ title: '准备交付', details: '完成并提交项目材料。', estimateMinutes: 180, specificity: 'concrete' }],
     constraints: { status: 'confirmed', items: [] },
     evidenceRequirements: [{ item: '交付验收', description: '保存验收结果。', minimumLevel: 'E2' }], reviewCycleDays: 7,
   });
-  activateGoalPlan(draft.id);
+  activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
   return draft.id;
 }
 

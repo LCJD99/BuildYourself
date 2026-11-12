@@ -29,6 +29,7 @@ function activeGoal() {
   const actionId = randomUUID();
   const draft = saveGoalPlanDraft({
     sourceIntent: '提升英语表达', title: '完成英文项目同步', domain: 'learning', context: '真实工作会议',
+    domainTemplate: { id: 'learning', version: '1.0.0' },
     successDescription: '能独立主持一次英文项目同步。', observableResult: '保存会议录音并取得导师反馈。',
     baselineStatus: 'known', baselineAction: null,
     milestones: [{ id: 'meeting', title: '主持项目同步', stage: 'near', successCriteria: '完成 10 分钟英文项目同步并回答提问。', standardAssessment: 'reasonable', evidenceAvailability: 'available', reviewNote: '可通过录音和反馈核对。', evidenceRequirement: '会议录音或导师反馈。' }],
@@ -37,7 +38,7 @@ function activeGoal() {
     evidenceRequirements: [{ id: 'recording', item: '会议录音', description: '保存完整会议录音。', minimumLevel: 'E2' }],
     reviewCycleDays: 7,
   });
-  return activateGoalPlan(draft.id);
+  return activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
 }
 
 function evidence(goal: ReturnType<typeof activeGoal>, level: 'E1' | 'E2' | 'E3' = 'E2', observedAt = new Date().toISOString()) {
@@ -77,6 +78,7 @@ describe('目标契约版本与进展口径', () => {
     expect(listGoalPlanContractVersions(goal.id)[0].plan.successDescription).toBe(goal.successDescription);
     expect(listGoalPlanContractVersions(goal.id)[1].plan.milestones[0].successCriteria).toContain('至少 3 个现场问题');
     expect(listGoalPlanContractVersions(goal.id)[1].plan.nextActions).toEqual(goal.nextActions);
+    expect(listGoalPlanContractVersions(goal.id)[1].plan.domainTemplate).toEqual(goal.domainTemplate);
   });
 
   it('每次评价固定保存实际使用的版本 ID 和规则快照，历史读取不随新版本变化', () => {

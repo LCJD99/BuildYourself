@@ -15,13 +15,14 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 function goal(hardDeadline = '2026-11-12') {
   const draft = saveGoalPlanDraft({
-    sourceIntent: '准备英语展示', title: '英语目标', domain: 'learning', successDescription: '完成展示', observableResult: '提交录音',
+    sourceIntent: '准备英语展示', title: '英语目标', domain: 'learning', domainTemplate: { id: 'learning', version: '1.0.0' },
+    successDescription: '完成展示', observableResult: '提交录音',
     baselineStatus: 'known', constraints: { status: 'confirmed', items: [] },
     milestones: [{ title: '完成展示', stage: 'near', successCriteria: '提交完整录音', standardAssessment: 'reasonable', evidenceAvailability: 'available', reviewNote: '可通过提交记录核实', evidenceRequirement: '提交记录' }],
     nextActions: [{ id: 'practice', title: '练习口语', estimateMinutes: 60, hardDeadline, specificity: 'concrete' }],
     evidenceRequirements: [{ item: '录音', description: '保存录音', minimumLevel: 'E2' }], reviewCycleDays: 7,
   });
-  activateGoalPlan(draft.id);
+  activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
   return draft.id;
 }
 

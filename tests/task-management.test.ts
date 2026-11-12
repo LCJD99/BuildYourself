@@ -16,6 +16,7 @@ function completePlan(title = '英语表达目标') {
     sourceIntent: `我想完成${title}`,
     title,
     domain: 'learning',
+    domainTemplate: { id: 'learning', version: '1.0.0' },
     context: '工作会议',
     successDescription: '能独立主持一次英文同步。',
     observableResult: '保存一段会议录音并获得导师反馈。',
@@ -31,7 +32,7 @@ function completePlan(title = '英语表达目标') {
 
 function activePlan(title?: string) {
   const draft = saveGoalPlanDraft(completePlan(title));
-  activateGoalPlan(draft.id);
+  activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
   return draft.id;
 }
 
