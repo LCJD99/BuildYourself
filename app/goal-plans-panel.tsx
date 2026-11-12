@@ -4,10 +4,17 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEvaluation, GoalPlanEventAction, GoalPlanStatus, GoalProject, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
 import type { Evidence } from '@/lib/model';
 import type { TaskChangeEvent } from '@/lib/milestone-store';
+import type { ExternalCommitment } from '@/lib/commitments';
 import ProjectProgressPanel from './project-progress-panel';
+import GoalPortfolioOverview from './goal-portfolio-overview';
+import { filterGoalPortfolio, summarizeGoalPortfolio, type GoalNavigationDetail, type GoalPortfolioFilter } from '@/lib/goal-navigation';
 
 type GoalPlanEvaluationSummary = Pick<GoalPlanEvaluation, 'id' | 'goalPlanId' | 'outcome' | 'status' | 'summary' | 'observedAt' | 'evaluatedAt' | 'evidenceIds'> & { contractVersion: Pick<GoalPlanEvaluation['contractVersion'], 'version'> };
-type GoalPlansState = { plans: GoalPlan[]; latestEvaluations: Record<string, GoalPlanEvaluationSummary | null>; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[]; projects: GoalProject[]; evidence: Evidence[] };
+type PublicGoalPlanEvaluation = Pick<GoalPlanEvaluation, 'goalPlanId' | 'milestoneId' | 'outcome' | 'status' | 'summary' | 'evidenceIds' | 'observedAt' | 'evaluatedAt'> & { contractVersion: Pick<GoalPlanEvaluation['contractVersion'], 'version'> };
+export type GoalPlansPanelState = { plans: GoalPlan[]; latestEvaluations: Record<string, GoalPlanEvaluationSummary | null>; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[]; projects: GoalProject[]; evidence: Evidence[]; commitments: ExternalCommitment[]; evaluations: PublicGoalPlanEvaluation[] };
+export type GoalPlanPanelDetail =
+  | { kind: 'action'; goal: GoalPlan; action: GoalPlanAction; actions: GoalPlanAction[]; changes: TaskChangeEvent[] }
+  | { kind: 'evidence'; goal: GoalPlan; evidence: Evidence; relatedAction: GoalPlanAction | null; actions: GoalPlanAction[]; changes: TaskChangeEvent[] };
 type LifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
 type TaskDraft = {
   title: string;
@@ -65,8 +72,22 @@ function formatTaskChangeValue(value: unknown, actions: GoalPlanAction[]) {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
-export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { focusActionId?: string | null; selectedProjectId?: string | null }) {
-  const [state, setState] = useState<GoalPlansState>({ plans: [], latestEvaluations: {}, pendingActions: [], actions: [], taskChanges: [], taskProposals: [], projects: [], evidence: [] });
+export default function GoalPlansPanel({ focusActionId, selectedProjectId, selectedGoalPlanId, onDataChange, onOpenDetail, onOpenWeeklyReview,
+  mode = 'manage', portfolioFilter = 'all', onPortfolioFilterChange, onOpenGoal, selectedNodeId,
+}: {
+  focusActionId?: string | null;
+  selectedProjectId?: string | null;
+  selectedGoalPlanId?: string | null;
+  onDataChange?: (state: GoalPlansPanelState) => void;
+  onOpenDetail?: (detail: GoalPlanPanelDetail) => void;
+  onOpenWeeklyReview?: () => void;
+  mode?: 'portfolio' | 'workspace' | 'manage';
+  portfolioFilter?: GoalPortfolioFilter;
+  onPortfolioFilterChange?: (filter: GoalPortfolioFilter) => void;
+  onOpenGoal?: (goalPlanId: string) => void;
+  selectedNodeId?: string | null;
+}) {
+  const [state, setState] = useState<GoalPlansPanelState>({ plans: [], latestEvaluations: {}, pendingActions: [], actions: [], taskChanges: [], taskProposals: [], projects: [], evidence: [], commitments: [], evaluations: [] });
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [completionPlanId, setCompletionPlanId] = useState<string | null>(null);
@@ -85,18 +106,23 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
   const [editingProjectEvidenceId, setEditingProjectEvidenceId] = useState<string | null>(null);
   const [projectEvidenceDraft, setProjectEvidenceDraft] = useState<Evidence | null>(null);
   const [savingProjectLink, setSavingProjectLink] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const lastScrolledFocus = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const response = await fetch('/api/goal-plans', { cache: 'no-store' });
       if (!response.ok) throw new Error('无法读取目标计划');
-      setState(await response.json() as GoalPlansState);
+      const data = await response.json() as GoalPlansPanelState;
+      setState(data);
+      onDataChange?.(data);
+      setLoaded(true);
       setError('');
     } catch (cause) {
+      setLoaded(true);
       setError(cause instanceof Error ? cause.message : '无法读取目标计划');
     }
-  }, []);
+  }, [onDataChange]);
 
   useEffect(() => {
     void refresh();
@@ -554,11 +580,38 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
       setBusyId(null);
     }
   }
-  const active = state.plans.filter(plan => plan.status === 'active');
-  const paused = state.plans.filter(plan => plan.status === 'paused');
-  const ended = state.plans.filter(plan => ['completed', 'archived', 'abandoned'].includes(plan.status));
-  const drafts = state.plans.filter(plan => plan.status === 'draft');
+  const allActive = state.plans.filter(plan => plan.status === 'active');
+  const active = selectedGoalPlanId ? allActive.filter(plan => plan.id === selectedGoalPlanId) : allActive;
+  const paused = selectedGoalPlanId ? [] : state.plans.filter(plan => plan.status === 'paused');
+  const ended = selectedGoalPlanId ? [] : state.plans.filter(plan => ['completed', 'archived', 'abandoned'].includes(plan.status));
+  const drafts = selectedGoalPlanId ? [] : state.plans.filter(plan => plan.status === 'draft');
   const selectedProject = state.projects.find(project => project.id === selectedProjectId);
+
+  function openPortfolioDetail(detail: GoalNavigationDetail) {
+    const goal = state.plans.find(plan => plan.id === detail.goalPlanId);
+    if (!goal || !onOpenDetail) return;
+    if (detail.kind === 'action') {
+      const action = state.actions.find(item => item.id === detail.id && item.goalPlanId === goal.id);
+      if (action) onOpenDetail({ kind: 'action', goal, action, actions: state.actions.filter(item => item.goalPlanId === goal.id), changes: state.taskChanges.filter(change => change.entityId === action.id) });
+    } else {
+      const item = state.evidence.find(evidence => evidence.id === detail.id && evidence.goalPlanId === goal.id);
+      if (item) onOpenDetail({ kind: 'evidence', goal, evidence: item, relatedAction: state.actions.find(action => action.id === item.goalActionId) ?? null,
+        actions: state.actions.filter(action => action.goalPlanId === goal.id), changes: state.taskChanges.filter(change => change.entityId === item.goalActionId) });
+    }
+  }
+
+  if (mode === 'portfolio') return <>
+    <GoalPortfolioOverview
+      summaries={filterGoalPortfolio(summarizeGoalPortfolio(state.plans, state.actions, state.evidence, new Date(), state.evaluations), portfolioFilter)}
+      filter={portfolioFilter}
+      selectedGoalPlanId={selectedGoalPlanId ?? null}
+      onFilterChange={filter => onPortfolioFilterChange?.(filter)}
+      onOpenGoal={goalPlanId => onOpenGoal?.(goalPlanId)}
+      onOpenDetail={openPortfolioDetail}
+      loading={!loaded}
+    />
+    {error && <p role="alert" className="error">{error}</p>}
+  </>;
 
   if (selectedProjectId) {
     const project = selectedProject;
@@ -651,8 +704,8 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
   return (
     <section className="goal-plans" aria-labelledby="goal-plans-title">
       <div className="section-title goal-plans-heading">
-        <div><span className="kicker">GOAL CONTRACTS</span><h2 id="goal-plans-title">自然语言目标计划</h2></div>
-        <span className="subtle">Pi 对话生成 · 用户确认状态变更</span>
+        <div><span className="kicker">{selectedGoalPlanId ? 'SINGLE GOAL WORKSPACE' : 'GOAL CONTRACTS'}</span><h2 id="goal-plans-title">{selectedGoalPlanId ? '单目标工作区' : '自然语言目标计划'}</h2></div>
+        <span className="subtle">{selectedGoalPlanId ? '目标地图、进展、里程碑、证据与下一行动' : 'Pi 对话生成 · 用户确认状态变更'}</span>
       </div>
       {error && <p role="alert" className="error">{error}</p>}
       {!state.plans.length && (
@@ -712,6 +765,16 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
       {active.map(plan => {
         const actions = state.actions.filter(action => action.goalPlanId === plan.id);
         const taskChanges = state.taskChanges.filter(change => change.details.goalPlanId === plan.id).slice(0, 5);
+        const goalEvidence = state.evidence.filter(item => item.goalPlanId === plan.id)
+          .sort((a, b) => b.observedAt.localeCompare(a.observedAt) || b.createdAt.localeCompare(a.createdAt));
+        const goalCommitments = state.commitments.filter(commitment => commitment.goalPlanId === plan.id);
+        const latestEvaluation = state.evaluations.filter(evaluation => evaluation.goalPlanId === plan.id)
+          .sort((a, b) => b.evaluatedAt.localeCompare(a.evaluatedAt))[0];
+        const nextAction = actions.filter(action => action.status !== 'done' && !action.decomposedAt)
+          .sort((a, b) => (a.deadline ?? '9999-12-31').localeCompare(b.deadline ?? '9999-12-31') || a.createdAt.localeCompare(b.createdAt))[0];
+        const milestoneEvaluationLabel = latestEvaluation
+          ? latestEvaluation.outcome === 'met' ? '符合标准' : latestEvaluation.outcome === 'not_met' ? '未符合标准' : '证据不足'
+          : '尚无进展评价';
         const editingHere = taskGoalPlanId === plan.id && taskDraft !== null;
         return (
           <article className="goal-card active-goal" id={`goal-plan-${plan.id}`} key={plan.id}>
@@ -733,10 +796,24 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
               {plan.baselineAction && <><dt>基线行动</dt><dd>{plan.baselineAction}</dd></>}
               <dt>关键限制</dt><dd>{plan.constraints.items.length ? plan.constraints.items.join('；') : '已确认无额外限制'}</dd>
             </dl>
+            {selectedGoalPlanId && <div className="goal-workspace-map">
+              <div className="goal-section-heading"><h4>目标地图</h4><span>目标 → 里程碑 → 行动</span></div>
+              <div className="goal-map-path"><strong>{plan.title}</strong><span>↓</span>
+                {plan.milestones.length ? plan.milestones.map(milestone => <div className="goal-map-milestone" key={milestone.id}>
+                  <strong>{milestone.title || '未命名里程碑'}</strong><small>{milestone.stage === 'near' ? '近期里程碑' : '远期里程碑'} · {milestone.successCriteria || '成功标准待补充'}</small>
+                  {actions.filter(action => action.milestoneId === milestone.id).map(action => <button type="button" className={selectedNodeId === action.id ? 'selected' : ''} aria-current={selectedNodeId === action.id ? 'true' : undefined} key={action.id} onClick={() => onOpenDetail?.({ kind: 'action', goal: plan, action, actions, changes: state.taskChanges.filter(change => change.entityId === action.id) })}>↳ {action.title} · {action.status === 'done' ? '已完成' : action.status === 'scheduled' ? '已安排' : '待排'}</button>)}
+                </div>) : <p className="goal-empty-inline">尚无里程碑，目标地图无法继续细分。</p>}
+              </div>
+            </div>}
+            {selectedGoalPlanId && <div className="goal-workspace-progress">
+              <div className="goal-section-heading"><h4>当前进展</h4><span>{milestoneEvaluationLabel}</span></div>
+              <p>行动完成 {actions.filter(action => action.status === 'done' && !action.decomposedAt).length}/{actions.filter(action => !action.decomposedAt).length} 项；这是执行记录，不等于目标达成。</p>
+              {latestEvaluation ? <article><strong>{latestEvaluation.summary}</strong><small>目标契约 v{latestEvaluation.contractVersion.version} · {formatDateTime(latestEvaluation.evaluatedAt)} · {latestEvaluation.evidenceIds.length} 条证据</small></article> : <p>尚无按目标契约记录的进展评价。</p>}
+            </div>}
             <div className="goal-subsection">
-              <h4>里程碑与证据核对</h4>
+              <h4>{selectedGoalPlanId ? '里程碑与承诺' : '里程碑与证据核对'}</h4>
               {plan.milestones.map(milestone => (
-                <div className="goal-milestone" key={milestone.id}>
+                <div className={`goal-milestone${selectedGoalPlanId && selectedNodeId === milestone.id ? ' selected' : ''}`} key={milestone.id} aria-current={selectedGoalPlanId && selectedNodeId === milestone.id ? 'true' : undefined}>
                   <div><span>{milestone.stage === 'near' ? '近期' : '远期'}</span><strong>{milestone.title}</strong></div>
                   {milestone.successCriteria && <p>{milestone.successCriteria}</p>}
                   <small>标准：{milestone.standardAssessment === 'reasonable' ? '已核对' : '暂定'} · 证据：{milestone.evidenceAvailability === 'available' ? '可获得' : milestone.evidenceAvailability === 'future' ? '进入近期阶段后细化' : '待确认'}</small>
@@ -746,6 +823,21 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
               ))}
             </div>
             {renderLatestEvaluation(plan)}
+            {selectedGoalPlanId && <div className="goal-subsection goal-workspace-commitments">
+              <h4>关联承诺</h4>
+              {goalCommitments.length ? goalCommitments.map(commitment => <article key={commitment.id}>
+                <strong>{commitment.deliverable}</strong><span>{commitment.status === 'scheduled' ? '已排入计划' : commitment.status === 'partially_scheduled' ? '部分排入计划' : '待安排'} · 截止 {formatDate(commitment.deadline)}</span>
+                <small>{commitment.tasks.length} 项任务 · {commitment.uncertainFields.length ? `${commitment.uncertainFields.length} 项字段待核对` : '字段已核对'}</small>
+              </article>) : <p className="goal-empty-inline">该目标暂无已确认的外部承诺。</p>}
+            </div>}
+            {selectedGoalPlanId && <div className="goal-subsection goal-workspace-evidence">
+              <h4>近期证据</h4>
+              {goalEvidence.length ? goalEvidence.slice(0, 5).map(item => <article className={selectedNodeId === item.id ? 'selected' : ''} key={item.id}>
+                <div><strong>{item.reference}</strong><span>{item.level} · {item.source} · {formatDateTime(item.observedAt)}</span></div>
+                <p>{item.text}</p>
+                <button type="button" className="edit-evidence-button" onClick={() => onOpenDetail?.({ kind: 'evidence', goal: plan, evidence: item, relatedAction: actions.find(action => action.id === item.goalActionId) ?? null, actions, changes: state.taskChanges.filter(change => change.entityId === item.goalActionId) })}>查看证据详情</button>
+              </article>) : <p className="goal-empty-inline">尚无关联到此目标的真实证据。</p>}
+            </div>}
             <div className="goal-subsection">
               <h4>共享项目入口</h4>
               {state.projects.filter(project => project.goals.some(goal => goal.goalPlanId === plan.id)).length ? <ul className="goal-evidence-requirements">
@@ -771,14 +863,20 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
             </div>
             <div className="goal-subsection">
               <div className="task-section-heading">
-                <h4>任务与待排池 <span className="count">{actions.length} 项 · {actions.filter(action => action.status === 'pending_schedule' && !action.decomposedAt).length} 项待排</span></h4>
+                <h4>{selectedGoalPlanId ? '下一行动与任务池' : '任务与待排池'} <span className="count">{actions.length} 项 · {actions.filter(action => action.status === 'pending_schedule' && !action.decomposedAt).length} 项待排</span></h4>
                 <button type="button" className="secondary-button" onClick={() => beginTaskCreate(plan.id)}>新增任务</button>
               </div>
+              {selectedGoalPlanId && <div className="goal-next-action">
+                <strong>下一行动</strong>
+                {nextAction ? <><span>{nextAction.title}</span><small>{nextAction.status === 'pending_schedule' ? '待排入日级计划' : '已安排到计划'} · 完成标准：{nextAction.successCriteria || '未设置'}</small><button type="button" className="edit-evidence-button" onClick={() => onOpenDetail?.({ kind: 'action', goal: plan, action: nextAction, actions, changes: state.taskChanges.filter(change => change.entityId === nextAction.id) })}>打开行动详情</button></>
+                  : <p className="goal-empty-inline">所有当前行动都已有完成记录，请结合目标证据确认下一步。</p>}
+              </div>}
               {actions.length ? <div className="goal-task-list">{actions.map(action => (
-                <article className="goal-task-card" id={`goal-action-${action.id}`} key={action.id}>
+                <article className={`goal-task-card${selectedNodeId === action.id ? ' selected' : ''}`} id={`goal-action-${action.id}`} key={action.id} aria-current={selectedNodeId === action.id ? 'true' : undefined}>
                   <div className="goal-task-card-head">
                     <div><span className={`goal-task-status ${action.decomposedAt ? 'decomposed' : action.status}`}>{action.decomposedAt ? '已拆分' : action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
                     <div className="goal-task-actions">
+                      <button type="button" className="edit-evidence-button" onClick={() => onOpenDetail?.({ kind: 'action', goal: plan, action, actions, changes: state.taskChanges.filter(change => change.entityId === action.id) })}>详情</button>
                       {action.status !== 'done' && !action.decomposedAt && <button type="button" className="edit-evidence-button" disabled={busyId === action.id} onClick={() => void markTaskDone(action)}>{busyId === action.id ? '记录中…' : '记录完成'}</button>}
                       <button type="button" className="edit-evidence-button" disabled={!!action.decomposedAt} onClick={() => beginTaskEdit(action)}>{action.decomposedAt ? '已拆分' : '编辑'}</button>
                     </div>
@@ -845,6 +943,11 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
               ))}
               {editingHere && renderTaskEditor(plan, actions)}
 
+              {selectedGoalPlanId && <div className="goal-workspace-review">
+                <strong>复盘入口</strong><span>结合本周行动与关联证据核对目标进展。</span>
+                <button type="button" className="secondary-button" onClick={onOpenWeeklyReview}>打开周复盘</button>
+              </div>}
+
               <div className="task-change-log">
                 <h4>最近变更</h4>
                 {taskChanges.length ? <ol>{taskChanges.map(change => <li key={change.id}>
@@ -857,7 +960,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
           </article>
         );
       })}
-      {active.length > 0 && <p className="goal-capacity-note">活跃目标 {active.length}/10。待排行动还没有进入日级计划。</p>}
+      {!selectedGoalPlanId && active.length > 0 && <p className="goal-capacity-note">活跃目标 {active.length}/10。待排行动还没有进入日级计划。</p>}
 
       {(paused.length > 0 || ended.length > 0) && (
         <section className="goal-history-section" aria-labelledby="goal-history-title">
@@ -882,7 +985,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
           ))}
         </section>
       )}
-      <p className="goal-capacity-note">当前活跃目标 {active.length}/10。暂停、完成、归档和放弃的目标保留在历史中。</p>
+      {!selectedGoalPlanId && <p className="goal-capacity-note">当前活跃目标 {active.length}/10。暂停、完成、归档和放弃的目标保留在历史中。</p>}
     </section>
   );
 }

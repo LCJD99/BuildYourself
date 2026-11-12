@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 import {
   evidenceLevels,
   nodes,
@@ -21,6 +21,10 @@ import type { WeeklyPlan } from '@/lib/daily-planner';
 import CommitmentsPanel from './commitments-panel';
 import ProjectNavigation from './project-navigation';
 import type { GoalProject } from '@/lib/goal-plans';
+import type { GoalPlanPanelDetail, GoalPlansPanelState } from './goal-plans-panel';
+import GoalNavigationDetailPane from './goal-navigation-detail';
+import { createGoalNavigationState, goalNavigationReducer, summarizeGoalPortfolio } from '@/lib/goal-navigation';
+import type { GoalNavigationDetail, GoalNavigationState } from '@/lib/goal-navigation';
 import HistoryCalendarPanel from './history-calendar-panel';
 import type { GoalEvidenceTarget } from '@/lib/goal-plans';
 
@@ -49,6 +53,52 @@ type Graph = {
   }>;
   context: NodeId;
 };
+
+const navigationStorageKey = 'buildyourself.goal-navigation.v1';
+
+function detailFromPanelState(detail: GoalNavigationDetail, state: GoalPlansPanelState): GoalPlanPanelDetail | null {
+  const goal = state.plans.find(plan => plan.id === detail.goalPlanId);
+  if (!goal) return null;
+  if (detail.kind === 'action') {
+    const action = state.actions.find(item => item.id === detail.id && item.goalPlanId === goal.id);
+    return action ? {
+      kind: 'action', goal, action,
+      actions: state.actions.filter(item => item.goalPlanId === goal.id),
+      changes: state.taskChanges.filter(change => change.entityId === action.id),
+    } : null;
+  }
+  const evidence = state.evidence.find(item => item.id === detail.id && item.goalPlanId === goal.id);
+  return evidence ? {
+    kind: 'evidence', goal, evidence,
+    relatedAction: state.actions.find(action => action.id === evidence.goalActionId) ?? null,
+    actions: state.actions.filter(action => action.goalPlanId === goal.id),
+    changes: state.taskChanges.filter(change => change.entityId === evidence.goalActionId),
+  } : null;
+}
+
+function restoreNavigationState(value: unknown): GoalNavigationState | null {
+  if (!value || typeof value !== 'object') return null;
+  const saved = value as Partial<GoalNavigationState>;
+  if (!['portfolio', 'goal', 'detail'].includes(saved.layer ?? '')) return null;
+  const base = createGoalNavigationState();
+  const layer = saved.layer!;
+  const returnLayer = saved.returnLayer === 'goal' ? 'goal' : saved.returnLayer === 'portfolio' ? 'portfolio' : null;
+  const restoreScrollTop = layer === 'goal' ? saved.goalScrollTop ?? 0
+    : layer === 'detail' && returnLayer === 'goal' ? saved.goalScrollTop ?? 0
+      : saved.portfolioScrollTop ?? 0;
+  return {
+    ...base,
+    ...saved,
+    layer,
+    filter: saved.filter === 'attention' ? 'attention' : 'all',
+    selectedGoalPlanId: typeof saved.selectedGoalPlanId === 'string' ? saved.selectedGoalPlanId : null,
+    selectedNodeId: typeof saved.selectedNodeId === 'string' ? saved.selectedNodeId : null,
+    detail: saved.detail && typeof saved.detail.id === 'string' && typeof saved.detail.goalPlanId === 'string'
+      && (saved.detail.kind === 'action' || saved.detail.kind === 'evidence') ? saved.detail : null,
+    returnLayer,
+    restoreScrollTop,
+  };
+}
 
 const labels: Record<NodeId, string> = { goal: '目标', task: '任务', milestone: '里程碑' };
 const requirementLevels: MinimumEvidenceLevel[] = ['E0', 'E1', 'E2', 'E3'];
@@ -102,6 +152,39 @@ export default function Workspace() {
   const [focusedAction, setFocusedAction] = useState<WeeklyPlan['days'][number]['actions'][number] | null>(null);
   const [selectedGoalPlanId, setSelectedGoalPlanId] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<GoalProject | null>(null);
+  const [navigation, navigate] = useReducer(goalNavigationReducer, undefined, createGoalNavigationState);
+  const [navigationReady, setNavigationReady] = useState(false);
+  const [goalPanelState, setGoalPanelState] = useState<GoalPlansPanelState | null>(null);
+  const [goalDetail, setGoalDetail] = useState<GoalPlanPanelDetail | null>(null);
+  const [legacyToolsOpen, setLegacyToolsOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = window.sessionStorage.getItem(navigationStorageKey);
+      if (saved) {
+        const restored = restoreNavigationState(JSON.parse(saved));
+        if (restored) navigate({ type: 'restore-state', state: restored });
+      }
+    } catch { /* a corrupt or unavailable session snapshot falls back to the overview */ }
+    setNavigationReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!navigationReady) return;
+    try {
+      window.sessionStorage.setItem(navigationStorageKey, JSON.stringify({ ...navigation, restoreScrollTop: null }));
+    } catch { /* navigation remains usable when session storage is unavailable */ }
+  }, [navigation, navigationReady]);
+
+  useEffect(() => {
+    if (!navigationReady || navigation.restoreScrollTop === null || !goalPanelState) return;
+    const top = navigation.restoreScrollTop;
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top, behavior: 'instant' });
+      navigate({ type: 'clear-restored-scroll' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [navigation.restoreScrollTop, navigationReady, goalPanelState]);
 
   const refresh = useCallback(async () => {
     try {
@@ -259,6 +342,81 @@ export default function Workspace() {
     setSelectedProject(current => current ? projects.find(project => project.id === current.id) ?? current : current);
   }, []);
 
+  const activeGoalPlans = goalPanelState?.plans.filter(plan => plan.status === 'active') ?? [];
+  const selectedGoal = activeGoalPlans.find(plan => plan.id === navigation.selectedGoalPlanId) ?? null;
+  const selectedGoalSummary = goalPanelState && selectedGoal
+    ? summarizeGoalPortfolio(goalPanelState.plans, goalPanelState.actions, goalPanelState.evidence, new Date(), goalPanelState.evaluations).find(summary => summary.goalPlanId === selectedGoal.id) ?? null
+    : null;
+
+  const openPortfolio = useCallback(() => {
+    setSelectedProject(null);
+    setFocusedAction(null);
+    setGoalDetail(null);
+    navigate({ type: 'show-portfolio' });
+    setSelected('goal');
+    void select('goal');
+  }, [select]);
+
+  const openGoal = useCallback((goalPlanId: string) => {
+    setSelectedProject(null);
+    setFocusedAction(null);
+    setGoalDetail(null);
+    navigate({ type: 'open-goal', goalPlanId, scrollTop: window.scrollY });
+    setSelected('goal');
+    void select('goal');
+  }, [select]);
+
+  const openGoalDetail = useCallback((detail: GoalPlanPanelDetail) => {
+    const nodeId = detail.kind === 'action' ? 'task' : detail.evidence.links.includes('task') ? 'task' : 'milestone';
+    const ref: GoalNavigationDetail = {
+      kind: detail.kind,
+      id: detail.kind === 'action' ? detail.action.id : detail.evidence.id,
+      goalPlanId: detail.goal.id,
+    };
+    setSelectedProject(null);
+    setGoalDetail(detail);
+    navigate({ type: 'open-detail', detail: ref, scrollTop: window.scrollY });
+    setSelected(nodeId);
+    void select(nodeId);
+  }, [select]);
+
+  const openWeeklyReview = useCallback(() => {
+    document.getElementById('weekly-review-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
+  useEffect(() => {
+    if (!navigationReady || !goalPanelState || !navigation.detail || navigation.layer !== 'detail') return;
+    const resolved = detailFromPanelState(navigation.detail, goalPanelState);
+    if (resolved) setGoalDetail(resolved);
+    else {
+      setGoalDetail(null);
+      navigate({ type: navigation.returnLayer === 'goal' ? 'show-goal' : 'show-portfolio' });
+    }
+  }, [goalPanelState, navigation.layer, navigation.detail, navigation.returnLayer, navigationReady]);
+
+  useEffect(() => {
+    if (!goalPanelState || navigation.layer !== 'goal' || !navigation.selectedGoalPlanId) return;
+    if (!activeGoalPlans.some(plan => plan.id === navigation.selectedGoalPlanId)) {
+      setGoalDetail(null);
+      navigate({ type: 'show-portfolio' });
+    }
+  }, [goalPanelState, navigation.layer, navigation.selectedGoalPlanId, activeGoalPlans]);
+
+  const contentLayer = navigation.layer === 'detail' ? navigation.returnLayer ?? 'portfolio' : navigation.layer;
+  const detailTitle = goalDetail?.kind === 'action' ? goalDetail.action.title
+    : goalDetail?.kind === 'evidence' ? `证据 · ${goalDetail.evidence.reference}` : '详情';
+  const goalDetailAction = goalDetail?.kind === 'action' ? goalDetail.action
+    : goalDetail?.kind === 'evidence' ? goalDetail.relatedAction : null;
+  const goalDetailConflictNotes = goalDetailAction ? (() => {
+    const plan = dailyPlanRecord.plan;
+    if (!plan || dailyPlanRecord.status !== 'confirmed') return ['当前没有已确认的日级计划，尚无法判断容量冲突。'];
+    const unplaced = plan.unplaced.find(item => item.action.id === goalDetailAction.id);
+    if (unplaced) return [`当前周计划未排入：${unplaced.reason}`];
+    const scheduled = plan.days.find(day => day.actions.some(item => item.actionId === goalDetailAction.id));
+    if (scheduled) return [`已安排于 ${scheduled.date}，当天占用 ${scheduled.usedMinutes}/${scheduled.capacityMinutes} 分钟。`];
+    return ['此行动不在当前周计划中；现有排期数据没有显示具体时间冲突。'];
+  })() : [];
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -267,17 +425,24 @@ export default function Workspace() {
           <div><strong>BuildYourself</strong><small>个人执行空间</small></div>
         </div>
         <div className="nav-label">工作空间 <span>01</span></div>
-        <button className="nav-home" onClick={() => { setSelectedProject(null); setFocusedAction(null); setSelectedGoalPlanId(null); void select('goal'); }}>◈ <span>目标全景</span></button>
-        <div className="tree-label">我的目标 <span>⌄</span></div>
-        <div className="tree">
-          {nodes.map((node, index) => (
-            <button key={node.id} className={`${!selectedProject && selected === node.id ? 'active ' : ''}${index ? 'child' : ''}`} onClick={() => { setSelectedProject(null); setFocusedAction(null); setSelectedGoalPlanId(null); void select(node.id); }}>
-              <span className="node-icon">{index === 0 ? '◉' : index === 1 ? '□' : '◇'}</span>
-              <span>{node.title}</span>
-            </button>
-          ))}
+        <button className={`nav-home${navigation.layer === 'portfolio' && !selectedProject ? ' active' : ''}`} onClick={openPortfolio}>◈ <span>目标组合总览</span></button>
+        <div className="tree-label">活跃目标 <span>{activeGoalPlans.length}</span></div>
+        <div className="tree goal-navigation-tree">
+          {activeGoalPlans.map(plan => <button key={plan.id} className={`${!selectedProject && navigation.selectedGoalPlanId === plan.id ? 'active ' : ''}child`} aria-current={!selectedProject && navigation.selectedGoalPlanId === plan.id ? 'page' : undefined} onClick={() => openGoal(plan.id)}>
+            <span className="node-icon">◉</span><span>{plan.title || '未命名目标'}</span>
+          </button>)}
+          {goalPanelState && activeGoalPlans.length === 0 && <p className="sidebar-empty-note">暂无活跃目标</p>}
         </div>
-        <ProjectNavigation selectedProjectId={selectedProject?.id} onSelect={project => { setSelectedProject(project); setFocusedAction(null); setSelectedGoalPlanId(null); }} onProjectsChange={syncProjectDetails} />
+        <details className="legacy-navigation">
+          <summary>证据判定图谱</summary>
+          <div className="tree">{nodes.map((node, index) => <button key={node.id} className={`${selected === node.id ? 'active ' : ''}${index ? 'child' : ''}`} onClick={() => {
+            setSelectedProject(null); setFocusedAction(null); setSelectedGoalPlanId(null); setLegacyToolsOpen(true); void select(node.id);
+            window.setTimeout(() => document.getElementById('legacy-workspace-tools')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+          }}>
+            <span className="node-icon">{index === 0 ? '◉' : index === 1 ? '□' : '◇'}</span><span>{node.title}</span>
+          </button>)}</div>
+        </details>
+        <ProjectNavigation selectedProjectId={selectedProject?.id} onSelect={project => { setSelectedProject(project); setFocusedAction(null); setSelectedGoalPlanId(null); setGoalDetail(null); }} onProjectsChange={syncProjectDetails} />
         {scheduledGoals.length > 0 && <>
           <div className="tree-label daily-plan-tree-label">本周行动归属</div>
           <div className="tree">{scheduledGoals.map(action => (
@@ -290,8 +455,30 @@ export default function Workspace() {
       </aside>
 
       <section className="center">
-        <header className="topbar"><span>工作空间 <b>/</b> {selectedProject ? `共享项目 · ${selectedProject.title}` : current.type}</span><span className="top-right">◷ &nbsp; 本地原型</span></header>
+        <header className="topbar">
+          <nav className="goal-breadcrumbs" aria-label="当前位置">
+            <button type="button" onClick={openPortfolio}>目标组合</button>
+            {selectedProject ? <><span>/</span><span aria-current="page">共享项目 · {selectedProject.title}</span></> : navigation.selectedGoalPlanId && <><span>/</span><button type="button" onClick={() => { setGoalDetail(null); navigate({ type: 'show-goal' }); }}>{goalPanelState?.plans.find(plan => plan.id === navigation.selectedGoalPlanId)?.title ?? '单目标工作区'}</button></>}
+            {navigation.layer === 'detail' && <><span>/</span><span aria-current="page">{detailTitle}</span></>}
+          </nav>
+          <span className="top-right">◷ &nbsp; 本地原型</span>
+        </header>
         <div className="content">
+          {selectedProject ? <GoalPlansPanel selectedProjectId={selectedProject.id} onDataChange={setGoalPanelState} />
+            : contentLayer === 'portfolio' ? <GoalPlansPanel
+              mode="portfolio" portfolioFilter={navigation.filter} selectedGoalPlanId={navigation.selectedGoalPlanId}
+              onPortfolioFilterChange={filter => navigate({ type: 'set-filter', filter })}
+              onOpenGoal={openGoal} onOpenDetail={openGoalDetail} onDataChange={setGoalPanelState}
+              onOpenWeeklyReview={openWeeklyReview}
+            /> : <>
+              <GoalPlansPanel mode="workspace" selectedGoalPlanId={navigation.selectedGoalPlanId}
+                selectedNodeId={navigation.selectedNodeId} onOpenDetail={openGoalDetail}
+                onDataChange={setGoalPanelState} onOpenWeeklyReview={openWeeklyReview} />
+              <WeeklyReviewPanel />
+            </>}
+          <details id="legacy-workspace-tools" className="legacy-workspace-tools" open={legacyToolsOpen} onToggle={event => setLegacyToolsOpen(event.currentTarget.open)}>
+            <summary>执行计划、承诺、历史日历与证据判定工具</summary>
+            {legacyToolsOpen && <div className="legacy-workspace-content">
           <div className="eyebrow"><span className="dot" /> {selectedProject ? '共享项目' : `${current.type}概览`} <span className="muted"> / &nbsp; EXECUTION SPACE</span></div>
           <h1>{selectedProject?.title ?? current.title}</h1>
           <p className="lead">{selectedProject ? '项目记录在主要位置和所有关联目标入口间保持一致。' : current.description}</p>
@@ -410,12 +597,44 @@ export default function Workspace() {
             </div>
           )}
           </>}
+            </div>}
+          </details>
         </div>
       </section>
 
       <aside className="detail">
-        <div className="detail-top"><span>结果与依据</span><span>✳</span></div>
+        <div className="detail-top"><span>{navigation.layer === 'detail' ? '行动与证据详情' : selectedGoal ? '当前目标' : selectedProject ? '共享项目' : '组合状态'}</span>
+          {navigation.layer === 'detail' ? <button type="button" className="detail-back" onClick={() => { setGoalDetail(null); navigate({ type: navigation.returnLayer === 'goal' ? 'show-goal' : 'show-portfolio' }); }}>返回上层</button> : <span>✳</span>}
+        </div>
         <div className="detail-content">
+          {navigation.layer === 'detail' ? goalDetail
+            ? <GoalNavigationDetailPane detail={goalDetail} conflictNotes={goalDetailConflictNotes} />
+            : <p className="goal-portfolio-loading">正在恢复所选详情…</p>
+            : selectedProject ? <section className="goal-right-summary">
+              <span className="kicker">SHARED PROJECT</span><h2>{selectedProject.title}</h2>
+              <p>主要目标：{selectedProject.goals.find(goal => goal.goalPlanId === selectedProject.primaryGoalPlanId)?.title ?? '目标已归档'}</p>
+              <p>关联目标 {selectedProject.goals.length} 个 · 里程碑 {selectedProject.milestones.length} 个 · 共享证据 {selectedProject.evidence.length} 条</p>
+            </section>
+            : selectedGoalSummary && selectedGoal ? <section className="goal-right-summary" aria-label="当前目标摘要">
+              <span className="goal-state active-state">目标状态 · 活跃</span><h2>{selectedGoal.title}</h2>
+              <div className="result-label"><span>下一里程碑</span><span>{selectedGoalSummary.nextMilestone?.stage === 'near' ? '近期' : selectedGoalSummary.nextMilestone ? '远期' : '待设置'}</span></div>
+              <p>{selectedGoalSummary.nextMilestone?.title ?? (selectedGoalSummary.milestoneCount ? '已确认全部里程碑' : '尚未设置里程碑')}{selectedGoalSummary.nextMilestone?.successCriteria ? ` · ${selectedGoalSummary.nextMilestone.successCriteria}` : ''}</p>
+              <div className="detail-divider" />
+              <div className="result-label"><span>执行记录</span><span>{selectedGoalSummary.completedActionCount}/{selectedGoalSummary.actionCount}</span></div>
+              <p>已完成行动数只描述执行状态，不表示目标达成。</p>
+              {selectedGoalSummary.latestEvidence ? <button type="button" className="goal-portfolio-link" onClick={() => {
+                const detail = goalPanelState && detailFromPanelState({ kind: 'evidence', id: selectedGoalSummary.latestEvidence!.id, goalPlanId: selectedGoal.id }, goalPanelState);
+                if (detail) openGoalDetail(detail);
+              }}>最近证据：{selectedGoalSummary.latestEvidence.reference} · {selectedGoalSummary.latestEvidence.level}</button> : <p>尚无关联目标的证据。</p>}
+              <div className="goal-portfolio-risk"><strong>风险提示</strong>{selectedGoalSummary.riskSignals.length ? <ul>{selectedGoalSummary.riskSignals.map(signal => <li key={signal}>{signal}</li>)}</ul> : <p>当前记录未显示风险提示。</p>}</div>
+              <button type="button" className="secondary-button" onClick={() => navigate({ type: 'show-goal' })}>打开目标工作区</button>
+            </section>
+            : <section className="goal-right-summary" aria-label="目标组合说明">
+              <span className="kicker">GOAL PORTFOLIO</span><h2>实际目标与记录</h2>
+              <p>活跃目标 {activeGoalPlans.length} 个。选择目标查看里程碑、行动、证据和复盘；摘要只读取本地保存的真实记录。</p>
+              {navigation.selectedNodeId && <small>最近选中节点：{goalPanelState?.plans.find(plan => plan.id === navigation.selectedNodeId)?.title ?? navigation.selectedNodeId}</small>}
+            </section>}
+          {legacyToolsOpen && <div className="legacy-detail-panel">
           <div className="detail-overline">CURRENT VIEW</div>
           <h2>{selectedProject?.title ?? current.title}</h2>
           <p className="detail-intro">执行记录、证据充足度和结果判定分别展示。</p>
@@ -504,6 +723,7 @@ export default function Workspace() {
           </section>}
           {!focusedAction && <div className="hint"><span>✳</span><p><strong>执行完成与目标进展分开判断</strong><br />保存行动完成不会自动提高能力或里程碑判定。</p></div>}
           </>}
+          </div>}
         </div>
       </aside>
     </main>
