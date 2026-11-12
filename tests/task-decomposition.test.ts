@@ -8,6 +8,7 @@ import { generateWeeklyPlan } from '../lib/daily-planner';
 import {
   activateGoalPlan,
   createGoalPlanAction,
+  createGoalProject,
   createTaskDecompositionProposal,
   listGoalPlanActions,
   listPendingGoalActions,
@@ -107,6 +108,20 @@ describe('任务拆分提议', () => {
     const draftDate = planned.days.find(day => day.actions.some(action => action.actionId === draft.id))?.date;
     expect(outlineDate).toBe('2026-11-09');
     expect(draftDate).toBe('2026-11-10');
+  });
+
+  it('确认拆分时让子任务继承父任务的显式项目 ID', () => {
+    const goalPlanId = activeGoal();
+    const project = createGoalProject({ title: '共享交付项目', goalPlanId });
+    const parent = createGoalPlanAction({ goalPlanId, title: '完成项目交付', projectId: project.id, estimateMinutes: 180 });
+    const saved = createTaskDecompositionProposal(parent.id, proposal());
+
+    resolveTaskDecompositionProposal(saved.id, { action: 'confirm' });
+
+    const children = listGoalPlanActions(goalPlanId).filter(action => action.parentActionId === parent.id);
+    expect(children).toHaveLength(2);
+    expect(children.map(action => action.projectId)).toEqual([project.id, project.id]);
+    expect(children.map(action => action.projectName)).toEqual(['共享交付项目', '共享交付项目']);
   });
 
   it('父任务依赖有更新时采用最新依赖，并让下游等待全部末端子任务', () => {

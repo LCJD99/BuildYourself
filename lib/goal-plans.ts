@@ -1038,19 +1038,23 @@ export function resolveTaskDecompositionProposal(id: unknown, input: unknown): T
     if (parentDeadline && tasks.some(task => task.deadline && task.deadline > parentDeadline)) throw new Error('子任务截止日期不能晚于父任务截止日期');
     const taskIds = new Map(tasks.map(task => [task.id, randomUUID()]));
     const parentDependencies = JSON.parse(String(parent.dependency_ids)) as string[];
+    const parentProjectId = parent.project_id === null || parent.project_id === undefined ? null : String(parent.project_id);
+    const parentProject = parentProjectId ? requireGoalProject(database, parentProjectId) : null;
+    const inheritedProjectName = parentProject?.title ?? (parent.project_name === null ? null : String(parent.project_name));
     const insertTask = database.prepare(`INSERT INTO goal_plan_actions
-      (id,goal_plan_id,title,details,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,
+      (id,goal_plan_id,title,details,project_id,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,
        status,priority,milestone_id,parent_action_id,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?,?,?,?)`);
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?,?,?,?)`);
     for (const task of tasks) {
       const dependencies = [...new Set([...parentDependencies, ...task.dependencyIds.map(dependencyId => taskIds.get(dependencyId)!)])];
       const taskId = taskIds.get(task.id)!;
-      insertTask.run(taskId, proposal.goalPlanId, task.title, task.details, task.projectName ?? (parent.project_name === null ? null : String(parent.project_name)),
+      const projectName = parentProjectId ? inheritedProjectName : task.projectName ?? inheritedProjectName;
+      insertTask.run(taskId, proposal.goalPlanId, task.title, task.details, parentProjectId, projectName,
         task.deadline ?? (parent.deadline === null ? null : String(parent.deadline)), task.estimateMinutes, JSON.stringify(dependencies), task.successCriteria,
         task.evidenceRequirement, String(parent.priority), parent.milestone_id === null ? null : String(parent.milestone_id), proposal.parentActionId, updatedAt, updatedAt);
       recordTaskChange(database, 'task.created', {
         id: taskId, goalPlanId: proposal.goalPlanId, title: task.title,
-        projectName: task.projectName ?? (parent.project_name === null ? null : String(parent.project_name)),
+        projectName,
       }, ['任务名称', '预计耗时', '截止日期', '依赖', '完成标准'], updatedAt, []);
     }
     const taskIdsUsedAsPrerequisites = new Set(tasks.flatMap(task => task.dependencyIds));
