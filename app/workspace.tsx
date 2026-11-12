@@ -88,6 +88,7 @@ export default function Workspace() {
   const [editingEvidence, setEditingEvidence] = useState<string | null>(null);
   const [evidenceDraft, setEvidenceDraft] = useState<Evidence | null>(null);
   const [dailyPlanRecord, setDailyPlanRecord] = useState<DailyPlanRecord>({ plan: null, status: null, confirmedAt: null, updatedAt: null });
+  const [dailyPlanRevision, setDailyPlanRevision] = useState(0);
   const [focusedAction, setFocusedAction] = useState<WeeklyPlan['days'][number]['actions'][number] | null>(null);
   const [selectedGoalPlanId, setSelectedGoalPlanId] = useState<string | null>(null);
 
@@ -277,8 +278,8 @@ export default function Workspace() {
             <span>◉ &nbsp; 活跃中</span><span>◇ &nbsp; 1 个里程碑</span><span>◷ &nbsp; {graph?.evidence.length ?? 0} 条证据</span>
           </div>
 
-          <DailyPlanPanel onActionClick={focusDailyAction} onPlanChange={updateDailyPlan} />
-          <CommitmentsPanel />
+          <DailyPlanPanel onActionClick={focusDailyAction} onPlanChange={updateDailyPlan} refreshKey={dailyPlanRevision} />
+          <CommitmentsPanel onPlanAccepted={record => { updateDailyPlan(record); setDailyPlanRevision(value => value + 1); }} />
           <GoalPlansPanel focusActionId={focusedAction?.actionId} />
 
           {selected === 'task' && (

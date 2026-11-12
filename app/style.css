@@ -46,3 +46,39 @@
 .commitments-panel{margin:34px 0 42px}.commitments-heading{margin-bottom:12px}.commitments-heading h2{font-size:18px}.commitments-intro{margin:0 0 14px;color:#879487;font-size:11px;line-height:1.7}.commitment-empty,.commitment-card{border:1px solid #e8ede6;border-radius:9px;background:#fff}.commitment-empty{padding:20px}.commitment-empty strong{font-size:12px;color:#617765}.commitment-empty p{margin:8px 0 0;color:#929e93;font-size:11px;line-height:1.7}.commitment-empty code{padding:2px 4px;border-radius:3px;background:#f2f5ef;color:#637b66}.commitment-error{padding:10px 12px;border-radius:6px;background:#fcf0ed;color:#a05442;font-size:11px}.commitment-group{margin:15px 0 22px}.commitment-group>h3{margin:0 0 9px;color:#738474;font-size:12px;font-weight:600}.commitment-card{padding:17px 19px;margin-bottom:10px}.commitment-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.commitment-card-head time{color:#a1aaa1;font-size:9px}.commitment-state{padding:5px 8px;border-radius:5px;background:#f8f2e5;color:#9c8146;font-size:9px;font-weight:600}.commitment-card>h4{margin:10px 0 0;color:#526555;font-size:14px;font-weight:600}.commitment-facts{display:grid;grid-template-columns:78px 1fr;gap:7px 9px;margin:14px 0 0}.commitment-facts dt{color:#a0aaa0;font-size:10px}.commitment-facts dd{margin:0;color:#68766b;font-size:10px;overflow-wrap:anywhere}.commitment-tasks{margin-top:15px}.commitment-tasks h5{margin:0 0 7px;color:#718073;font-size:10px;font-weight:600}.commitment-tasks ol{margin:0;padding-left:22px}.commitment-tasks li{padding:8px 0;border-top:1px solid #f1f3ef;color:#526555;font-size:10px}.commitment-tasks li strong{display:block;font-weight:600}.commitment-tasks li span{display:block;margin-top:4px;color:#89958a;line-height:1.55}.commitment-tasks li p{margin:5px 0 0;color:#89958a;line-height:1.6}.commitment-uncertainties{margin-top:12px;padding:10px 12px;border-radius:6px;background:#fbf8ef;color:#8b7645;font-size:10px}.commitment-uncertainties ul{margin:6px 0 0;padding-left:17px;line-height:1.7}.commitment-source{margin-top:12px;color:#7e8c80}.commitment-source summary{cursor:pointer;font-size:9px;color:#718575}.commitment-source p{margin:7px 0 0;color:#89958a;font-size:10px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
 
 @media(max-width:650px){.commitment-card{padding:14px}.commitment-facts{grid-template-columns:67px 1fr}.commitments-heading{align-items:flex-start;flex-direction:column}}
+.commitment-state.scheduled{background:#e8f1e8;color:#527258}
+.replan-panel{margin-top:25px;padding:18px;border:1px solid #e2e9df;border-radius:10px;background:#f8faf7}
+.replan-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.replan-head h3{margin:5px 0;color:#526555;font-size:15px}
+.replan-intro{margin:8px 0 14px;color:#879487;font-size:10px;line-height:1.7}
+.replan-form{display:grid;gap:10px;padding:13px;border:1px solid #e8ede6;border-radius:8px;background:#fff}
+.replan-form label,.replan-history-select{display:grid;gap:5px;color:#748174;font-size:10px}
+.replan-form input,.replan-form select,.replan-form textarea,.replan-history-select select{width:100%;min-height:34px;padding:7px 9px;border:1px solid #e1e7df;border-radius:6px;background:#fff;color:#536254;font:inherit}
+.replan-form textarea{resize:vertical;line-height:1.6}
+.replan-capacity-fields{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.replan-form .primary-button{justify-self:start}
+.replan-history-select{margin-top:14px}
+.replan-proposal{margin-top:12px;padding:14px;border:1px solid #e8ede6;border-radius:8px;background:#fff}
+.replan-proposal-status{display:flex;justify-content:space-between;gap:10px;color:#627565;font-size:10px}
+.replan-proposal-status time{color:#a1aaa1;font-size:9px}
+.replan-reason{margin:9px 0;color:#879487;font-size:10px;line-height:1.7}
+.replan-changes{list-style:none;margin:0;padding:0;border-top:1px solid #eef1eb}
+.replan-changes li{display:grid;gap:4px;padding:9px 0;border-bottom:1px solid #eef1eb;font-size:10px}
+.replan-changes strong{color:#526555;font-weight:600}
+.replan-changes span{color:#748174}
+.replan-changes small,.replan-task small{color:#929d92;font-size:9px;line-height:1.6}
+.replan-no-changes{color:#849184;font-size:10px}
+.replan-schedule{margin-top:12px;color:#718073}
+.replan-schedule summary{cursor:pointer;font-size:10px;font-weight:600}
+.replan-day-summary{margin-top:9px;padding:8px 9px;border:1px solid #edf1eb;border-radius:6px;background:#fbfcfa}
+.replan-day-summary-head{display:flex;justify-content:space-between;gap:8px;color:#697a6c;font-size:9px}
+.replan-day-summary-head span{color:#929d92;text-align:right}
+.replan-task{display:grid;grid-template-columns:minmax(0,1fr) 125px;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #f0f2ee}
+.replan-task>div{display:grid;gap:3px;min-width:0}
+.replan-task strong{color:#5d6d5f;font-size:10px;overflow-wrap:anywhere}
+.replan-task select{width:100%;min-height:30px;padding:5px;border:1px solid #e1e7df;border-radius:5px;background:#fff;color:#68766b;font:inherit;font-size:9px}
+.replan-task>span{color:#718073;font-size:9px;text-align:right}
+.replan-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+.replan-actions button{padding:8px 10px;font-size:9px}
+.replan-edit-hint{display:block;margin-top:8px;color:#9b8350;font-size:9px}
+@media(max-width:650px){.replan-panel{padding:13px}.replan-head{align-items:flex-start;flex-direction:column}.replan-task{grid-template-columns:minmax(0,1fr) 112px}.replan-actions button{flex:1}}

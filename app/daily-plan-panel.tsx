@@ -37,9 +37,11 @@ function defaultCapacities(weekStart: string) {
 export default function DailyPlanPanel({
   onActionClick,
   onPlanChange,
+  refreshKey = 0,
 }: {
   onActionClick: (action: DailyPlanAction) => void;
   onPlanChange: (record: DailyPlanRecord) => void;
+  refreshKey?: number;
 }) {
   const weekStart = useMemo(thisWeekStart, []);
   const [record, setRecord] = useState<DailyPlanRecord>({ plan: null, status: null, confirmedAt: null, updatedAt: null });
@@ -69,7 +71,7 @@ export default function DailyPlanPanel({
     }
   }, [applyResponse, weekStart]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { void refresh(); }, [refresh, refreshKey]);
 
   async function generate() {
     setBusy(true);

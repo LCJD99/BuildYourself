@@ -66,6 +66,7 @@ export function generateWeeklyPlan(input: {
   weekStart: string;
   actions: PlannerAction[];
   capacities?: Record<string, number>;
+  preferredDates?: Record<string, string>;
 }): WeeklyPlan {
   if (!parseDate(input.weekStart)) throw new Error('周起始日期必须是有效的 YYYY-MM-DD 日期。');
   if (new Set(input.actions.map(action => action.id)).size !== input.actions.length) throw new Error('待排行动 ID 不能重复。');
@@ -130,9 +131,12 @@ export function generateWeeklyPlan(input: {
     const dependencyDates = action.dependsOn.map(id => scheduledDate.get(id)!);
     const earliestDate = dependencyDates.length ? addDays(dependencyDates.sort().at(-1)!, 1) : input.weekStart;
     const duration = action.estimateMinutes ?? DEFAULT_ESTIMATE_MINUTES;
-    const candidate = days.find(day => day.date >= earliestDate
+    const eligible = (day: WeeklyPlanDay) => day.date >= earliestDate
       && (!action.hardDeadline || day.date <= action.hardDeadline)
-      && day.capacityMinutes - day.usedMinutes >= duration);
+      && day.capacityMinutes - day.usedMinutes >= duration;
+    const preferredDate = input.preferredDates?.[action.id];
+    const candidate = (preferredDate ? days.find(day => day.date === preferredDate && eligible(day)) : undefined)
+      ?? days.find(eligible);
 
     pending.delete(action.id);
     if (!candidate) {

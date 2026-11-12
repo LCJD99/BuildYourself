@@ -31,7 +31,7 @@ export type ExternalCommitmentInput = {
 export type ExternalCommitment = ExternalCommitmentInput & {
   id: string;
   goalTitle: string | null;
-  status: 'pending_schedule';
+  status: 'pending_schedule' | 'partially_scheduled' | 'scheduled';
   createdAt: string;
 };
 
@@ -170,7 +170,7 @@ function commitmentFromRow(row: Record<string, unknown>): ExternalCommitment {
     goalTitle: row.goal_title === null ? null : String(row.goal_title),
     tasks: JSON.parse(String(row.tasks_json)) as CommitmentTask[],
     uncertainFields: JSON.parse(String(row.uncertain_fields_json)) as CommitmentUncertainty[],
-    status: 'pending_schedule',
+    status: row.status === 'scheduled' || row.status === 'partially_scheduled' ? row.status : 'pending_schedule',
     createdAt: String(row.created_at),
   };
 }

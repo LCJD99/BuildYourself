@@ -45,6 +45,21 @@ describe('日级计划生成', () => {
     expect(plan.unplaced).toEqual([]);
   });
 
+  it('重排时保留仍有容量且不违反截止和依赖的原日期', () => {
+    const plan = generateWeeklyPlan({
+      weekStart: '2026-11-09',
+      capacities: { '2026-11-09': 60, '2026-11-10': 60, '2026-11-11': 60 },
+      preferredDates: { prepare: '2026-11-10', submit: '2026-11-11' },
+      actions: [
+        action({ id: 'prepare', hardDeadline: '2026-11-11' }),
+        action({ id: 'submit', dependsOn: ['prepare'], hardDeadline: '2026-11-12' }),
+      ],
+    });
+
+    expect(plan.days[1].actions.map(item => item.actionId)).toEqual(['prepare']);
+    expect(plan.days[2].actions.map(item => item.actionId)).toEqual(['submit']);
+  });
+
   it('标记默认时长，并说明容量或截止导致的未安排事项', () => {
     const plan = generateWeeklyPlan({
       weekStart: '2026-11-09',

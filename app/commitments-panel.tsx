@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { CommitmentField, ExternalCommitment } from '@/lib/commitments';
+import ReplanPanel from './replan-panel';
+import type { DailyPlanRecord } from '@/lib/daily-plan-store';
 
 type CommitmentState = { commitments: ExternalCommitment[] };
 
@@ -26,7 +28,7 @@ function uncertaintyLabel(field: CommitmentField, taskIndex: number | null) {
   return taskIndex === null ? label : `任务 ${taskIndex + 1} · ${label}`;
 }
 
-export default function CommitmentsPanel() {
+export default function CommitmentsPanel({ onPlanAccepted }: { onPlanAccepted: (record: DailyPlanRecord) => void }) {
   const [state, setState] = useState<CommitmentState>({ commitments: [] });
   const [error, setError] = useState('');
 
@@ -62,7 +64,7 @@ export default function CommitmentsPanel() {
         <div><span className="kicker">EXTERNAL COMMITMENTS</span><h2 id="commitments-title">外部承诺</h2></div>
         <span className="subtle">事实确认与排期分开处理</span>
       </div>
-      <p className="commitments-intro">在 pi 中核对并保存的通知会显示在这里。保存承诺不会改动既有计划；每条承诺仍标记为尚未排入。</p>
+      <p className="commitments-intro">在 pi 中核对并保存的通知会显示在这里。保存承诺不会直接改动既有计划；重排建议由你单独核对和决定。</p>
       {error && <p className="commitment-error" role="alert">{error}</p>}
       {state.commitments.length === 0 ? (
         <div className="commitment-empty"><strong>暂无已确认的外部承诺</strong><p>在 pi 中使用 <code>/commitment</code> 并粘贴通知，核对字段后再保存。</p></div>
@@ -72,7 +74,9 @@ export default function CommitmentsPanel() {
           {group.commitments.map(commitment => (
             <article className="commitment-card" key={commitment.id}>
               <div className="commitment-card-head">
-                <span className="commitment-state">已确认 · 尚未排入</span>
+                <span className={`commitment-state ${commitment.status === 'scheduled' ? 'scheduled' : ''}`}>
+                  {commitment.status === 'scheduled' ? '已排入' : commitment.status === 'partially_scheduled' ? '部分已排入 · 尚有未排入' : '已确认 · 尚未排入'}
+                </span>
                 <time>{new Date(commitment.createdAt).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })}</time>
               </div>
               <h4>{commitment.deliverable}</h4>
@@ -110,6 +114,7 @@ export default function CommitmentsPanel() {
           ))}
         </div>
       ))}
+      <ReplanPanel onAccepted={onPlanAccepted} />
     </section>
   );
 }
