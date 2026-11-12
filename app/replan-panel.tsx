@@ -225,8 +225,16 @@ export default function ReplanPanel({ goals, onAccepted }: { goals: Array<{ id: 
             <strong>部分安排仍有硬截止风险</strong>
             <p>系统保留硬截止和恢复约束；以下工作未能排入，不能视为已完成或已延期。请决定接受这份部分安排，或拒绝后调整容量、恢复日再生成建议。</p>
             <ul>{selected.deadlineGaps.map(gap => <li key={gap.deadline}>
-              <strong>{dateLabel(gap.deadline)} 前仍有 {gap.timeGapMinutes} 分钟未排工作量</strong>
-              <ul>{gap.items.map(item => <li key={item.actionId}>{item.title} · {item.minutes} 分钟 · {item.reason}</li>)}</ul>
+              <strong>{dateLabel(gap.deadline)} 前仍有{gap.workloadHasDefaultEstimate ? '约 ' : ' '}{gap.unplacedWorkMinutes} 分钟未排工作量</strong>
+              <small>{gap.availableCapacityMinutes === null
+                ? '相关可用容量无法确定（行动依赖尚未排入）'
+                : `${gap.capacityHasDefaultValue ? '估算的' : ''}相关日期可用容量合计 ${gap.availableCapacityMinutes} 分钟，单日最多 ${gap.maxSingleDayCapacityMinutes} 分钟`}</small>
+              {gap.calculation === 'exact'
+                ? <small>保持已排任务和约束不变，至少还需增加 {gap.requiredAdditionalCapacityMinutes} 分钟容量。</small>
+                : gap.calculation === 'estimate'
+                  ? <small>按默认时长或容量估算，保持已排任务和约束不变，至少还需增加约 {gap.requiredAdditionalCapacityMinutes} 分钟容量。</small>
+                : <small>新增容量缺口不可确定：{gap.calculationNote}</small>}
+              <ul>{gap.items.map(item => <li key={item.actionId}>{item.title} · {item.minutesAreDefaultEstimate ? '约 ' : ''}{item.minutes} 分钟 · {item.reason}</li>)}</ul>
             </li>)}</ul>
             {selected.status === 'draft' && <label className="replan-tradeoff-confirm"><input type="checkbox" checked={acknowledgedProposalId === selected.id} disabled={busy || Object.keys(edits).length > 0} onChange={event => setAcknowledgedProposalId(event.target.checked ? selected.id : '')} />我已查看未解决的硬截止事项，并决定接受这份部分安排。</label>}
           </div>}

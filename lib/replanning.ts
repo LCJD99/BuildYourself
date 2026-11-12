@@ -9,8 +9,15 @@ export type ReplanTrigger = 'new_commitment' | 'deadline_change' | 'scope_change
 export type ReplanChange = { actionId: string; title: string; fromDate: string | null; toDate: string | null; reason: string };
 export type ReplanDeadlineGap = {
   deadline: string;
-  timeGapMinutes: number;
-  items: Array<{ actionId: string; title: string; minutes: number; reason: string }>;
+  unplacedWorkMinutes: number;
+  workloadHasDefaultEstimate: boolean;
+  availableCapacityMinutes: number | null;
+  maxSingleDayCapacityMinutes: number | null;
+  capacityHasDefaultValue: boolean;
+  requiredAdditionalCapacityMinutes: number | null;
+  calculation: 'exact' | 'estimate' | 'unknown';
+  calculationNote: string;
+  items: Array<{ actionId: string; title: string; minutes: number; minutesAreDefaultEstimate: boolean; reason: string }>;
 };
 export type ReplanProposal = {
   id: string;
@@ -71,22 +78,89 @@ function sourceState(database: ReturnType<typeof openDatabase>) {
   return JSON.stringify({ goalPlans, actions, commitments });
 }
 
+function nextDate(value: string) {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+export function calculateReplanDeadlineGaps(plan: WeeklyPlan): ReplanDeadlineGap[] {
+  const placedDates = new Map(plan.days.flatMap(day => day.actions.map(action => [action.actionId, day.date] as const)));
+  const unplaced = Array.isArray(plan.unplaced) ? plan.unplaced : [];
+  const hardDeadlineItems = unplaced.filter(entry => Boolean(entry.action.hardDeadline));
+  const deadlines = [...new Set(hardDeadlineItems.map(entry => entry.action.hardDeadline!))].sort();
+  const freeMinutes = new Map(plan.days.map(day => [day.date, Math.max(0, day.capacityMinutes - day.usedMinutes)]));
+  const eligibleDates = (action: PlannerAction): string[] | null => {
+    const dependencyDates = action.dependsOn.map(id => placedDates.get(id));
+    if (dependencyDates.some(date => date === undefined)) return null;
+    const latestDependency = dependencyDates.filter((date): date is string => date !== undefined).sort().at(-1);
+    const earliestDate = latestDependency ? nextDate(latestDependency) : plan.weekStart;
+    return plan.days.filter(day => day.date >= earliestDate
+      && day.date <= action.hardDeadline!
+      && !plan.recoveryConstraints?.some(constraint => constraint.goalPlanId === action.goalPlanId && constraint.date === day.date))
+      .map(day => day.date);
+  };
+
+  return deadlines.map(deadline => {
+    const entries = hardDeadlineItems.filter(entry => entry.action.hardDeadline === deadline);
+    const items = entries.map(entry => ({
+      actionId: entry.action.id,
+      title: entry.action.title,
+      minutes: entry.action.estimateMinutes ?? 30,
+      minutesAreDefaultEstimate: entry.action.estimateMinutes === null,
+      reason: entry.reason,
+    }));
+    const windows = entries.map(entry => eligibleDates(entry.action));
+    const hasUnknownWindow = windows.some(window => window === null);
+    const usableDates = new Set(windows.flatMap(window => window ?? []));
+    const availableCapacityMinutes = hasUnknownWindow ? null : [...usableDates].reduce((sum, date) => sum + (freeMinutes.get(date) ?? 0), 0);
+    const maxSingleDayCapacityMinutes = hasUnknownWindow ? null : Math.max(0, ...[...usableDates].map(date => freeMinutes.get(date) ?? 0));
+    const unplacedWorkMinutes = items.reduce((sum, item) => sum + item.minutes, 0);
+    const workloadHasDefaultEstimate = items.some(item => item.minutesAreDefaultEstimate);
+    const capacityHasDefaultValue = [...usableDates].some(date => {
+      const day = plan.days.find(item => item.date === date)!;
+      return day.capacityIsDefault || day.actions.some(action => action.estimateIsDefault);
+    });
+    const unplacedByThisDeadline = hardDeadlineItems.filter(entry => entry.action.hardDeadline! <= deadline);
+    const hasSingleObligation = unplacedByThisDeadline.length === 1 && entries.length === 1;
+    const onlyWindow = windows[0];
+    const canCalculateExactGap = hasSingleObligation && onlyWindow !== null && Boolean(onlyWindow?.length);
+    const requiredAdditionalCapacityMinutes = canCalculateExactGap
+      ? Math.max(0, items[0].minutes - Math.max(...onlyWindow!.map(date => freeMinutes.get(date) ?? 0)))
+      : null;
+    const calculation = requiredAdditionalCapacityMinutes === null
+      ? 'unknown'
+      : workloadHasDefaultEstimate || capacityHasDefaultValue ? 'estimate' : 'exact';
+    const calculationNote = calculation === 'exact'
+      ? '仅有一项未排硬截止行动，且其依赖已安排；按合法日期中最大单日剩余容量计算，假设已排安排保持不变。'
+      : calculation === 'estimate'
+        ? '按默认行动时长或每日容量估算；按合法日期中最大单日剩余容量计算，假设已排安排保持不变。'
+      : hasUnknownWindow
+        ? '至少一项行动的依赖尚未排入，无法确定其可用日期，因此不计算精确容量缺口。'
+        : !onlyWindow?.length && entries.length === 1
+          ? '硬截止、依赖或恢复约束下没有合法可安排日期；需先调整约束，无法给出有限的新增容量缺口。'
+          : '多项未排硬截止行动可能竞争同一容量，或有更早截止事项尚未排入；不把未排工作量误当作精确容量缺口。';
+    return {
+      deadline,
+      unplacedWorkMinutes,
+      workloadHasDefaultEstimate,
+      availableCapacityMinutes,
+      maxSingleDayCapacityMinutes,
+      capacityHasDefaultValue,
+      requiredAdditionalCapacityMinutes,
+      calculation,
+      calculationNote,
+      items,
+    };
+  });
+}
+
 function fromRow(row: Record<string, unknown>): ReplanProposal {
   const plan = JSON.parse(String(row.plan_json)) as WeeklyPlan;
-  const unplaced = Array.isArray(plan.unplaced) ? plan.unplaced : [];
-  const gaps = new Map<string, ReplanDeadlineGap>();
-  for (const entry of unplaced) {
-    if (!entry.action.hardDeadline) continue;
-    const gap = gaps.get(entry.action.hardDeadline) ?? { deadline: entry.action.hardDeadline, timeGapMinutes: 0, items: [] };
-    const minutes = entry.action.estimateMinutes ?? 30;
-    gap.timeGapMinutes += minutes;
-    gap.items.push({ actionId: entry.action.id, title: entry.action.title, minutes, reason: entry.reason });
-    gaps.set(entry.action.hardDeadline, gap);
-  }
   return {
     id: String(row.id), weekStart: String(row.week_start), version: Number(row.version), trigger: String(row.trigger) as ReplanTrigger,
     triggerReason: String(row.trigger_reason), previousPlan: JSON.parse(String(row.previous_plan_json)) as WeeklyPlan,
-    plan, deadlineGaps: [...gaps.values()].sort((a, b) => a.deadline.localeCompare(b.deadline)), changes: JSON.parse(String(row.changes_json)) as ReplanChange[],
+    plan, deadlineGaps: calculateReplanDeadlineGaps(plan), changes: JSON.parse(String(row.changes_json)) as ReplanChange[],
     status: String(row.status) as ReplanProposal['status'], createdAt: String(row.created_at),
     decidedAt: row.decided_at === null ? null : String(row.decided_at),
   };

@@ -135,7 +135,10 @@ describe('重排建议', () => {
     expect(proposal.plan.unplaced).toMatchObject([{
       action: { title: '练习口语', hardDeadline: '2026-11-09' }, reason: expect.stringContaining('恢复约束'),
     }]);
-    expect(proposal.deadlineGaps).toMatchObject([{ deadline: '2026-11-09', timeGapMinutes: 60, items: [{ title: '练习口语' }] }]);
+    expect(proposal.deadlineGaps).toMatchObject([{
+      deadline: '2026-11-09', unplacedWorkMinutes: 60, availableCapacityMinutes: 0,
+      requiredAdditionalCapacityMinutes: null, calculation: 'unknown', items: [{ title: '练习口语' }],
+    }]);
     expect(() => editReplanProposal(proposal.id, { [proposal.plan.unplaced[0].action.id]: '2026-11-09' })).toThrow('恢复约束日期');
     expect(listExternalCommitments().find(item => item.id === savedCommitment.id)?.goalPlanId).toBeNull();
     expect(() => decideReplanProposal(proposal.id, 'accept')).toThrow('明确确认未解决的硬截止');
