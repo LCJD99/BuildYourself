@@ -36,10 +36,10 @@ export default function ProjectNavigation({ selectedProjectId, onSelect, onProje
         return <div className="project-tree-group" key={project.id}>
           <button className={`${selectedProjectId === project.id ? 'active ' : ''}project-tree-primary`} onClick={() => onSelect(project)}>
             <span className="node-icon">▣</span>
-            <span>{project.title}<small>主要位置 · {primary?.title ?? '目标已归档'}</small></span>
+            <span>{project.title}<small>主要位置 · {primary?.title ?? '目标已归档'} · {project.id.slice(0, 6)}</small></span>
           </button>
           {aliases.map(goal => <button key={goal.goalPlanId} className={`${selectedProjectId === project.id ? 'active ' : ''}child project-tree-alias`} onClick={() => onSelect(project)}>
-            <span className="node-icon">↗</span><span>{goal.title} · {project.title}</span>
+            <span className="node-icon">↗</span><span>{goal.title} · {project.title} · {project.id.slice(0, 6)}</span>
           </button>)}
         </div>;
       })}

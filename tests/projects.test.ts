@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activateGoalPlan, createGoalPlanAction, createOrLinkGoalProject, linkGoalProjectEvidence, listGoalPlanActions, listGoalProjects, saveGoalPlanDraft, updateGoalPlanAction } from '../lib/goal-plans';
+import { activateGoalPlan, createGoalPlanAction, createGoalProject, linkGoalProjectEvidence, linkGoalProjectMilestone, linkGoalProjectToGoal, listGoalPlanActions, listGoalProjects, saveGoalPlanDraft, updateGoalPlanAction } from '../lib/goal-plans';
 import { saveEvidence } from '../lib/store';
 import { correctEvidence } from '../lib/milestone-store';
 
@@ -33,26 +33,47 @@ function activePlan(title: string) {
 }
 
 describe('共享项目', () => {
-  it('同名项目跨目标复用同一记录，并显示同一任务 ID 和更新', () => {
+  it('同名项目默认使用不同 ID，只有显式 ID 关联后才共享任务', () => {
     const first = activePlan('项目目标 A');
     const second = activePlan('项目目标 B');
-    const project = createOrLinkGoalProject({ title: '年度报告', goalPlanId: first.id });
-    const shared = createOrLinkGoalProject({ title: ' 年度报告 ', goalPlanId: second.id });
-    const task = createGoalPlanAction({ goalPlanId: first.id, title: '起草报告', projectName: '年度报告' });
+    const project = createGoalProject({ title: '年度报告', goalPlanId: first.id });
+    const sameNameProject = createGoalProject({ title: '年度报告', goalPlanId: second.id });
+
+    expect(sameNameProject.id).not.toBe(project.id);
+    expect(sameNameProject.goals.map(goal => goal.goalPlanId)).toEqual([second.id]);
+
+    const shared = linkGoalProjectToGoal(project.id, { goalPlanId: second.id });
+    const task = createGoalPlanAction({ goalPlanId: first.id, title: '起草报告', projectId: project.id });
+    const sharedTask = createGoalPlanAction({ goalPlanId: second.id, title: '核对交付', projectId: project.id });
 
     expect(shared.id).toBe(project.id);
     expect(shared.goals.map(goal => goal.goalPlanId)).toEqual(expect.arrayContaining([first.id, second.id]));
     expect(task.projectId).toBe(project.id);
-    expect(listGoalPlanActions().filter(action => action.projectId === shared.id).map(action => action.id)).toEqual([task.id]);
+    expect(listGoalPlanActions().filter(action => action.projectId === shared.id).map(action => action.id)).toEqual([task.id, sharedTask.id]);
 
     updateGoalPlanAction(task.id, { title: '核对并提交报告' });
     expect(listGoalPlanActions().find(action => action.projectId === project.id)).toMatchObject({ id: task.id, title: '核对并提交报告' });
     expect(listGoalProjects().find(item => item.id === project.id)?.goals).toHaveLength(2);
   });
 
+  it('项目页只显示明确关联到项目的里程碑', () => {
+    const first = activePlan('项目目标 A');
+    const second = activePlan('项目目标 B');
+    const project = createGoalProject({ title: '共同交付', goalPlanId: first.id });
+    linkGoalProjectToGoal(project.id, { goalPlanId: second.id });
+
+    expect(listGoalProjects().find(item => item.id === project.id)?.milestones).toEqual([]);
+
+    const milestone = first.milestones[0];
+    const linked = linkGoalProjectMilestone(project.id, { goalPlanId: first.id, milestoneId: milestone.id });
+
+    expect(linked.milestones).toMatchObject([{ goalPlanId: first.id, goalTitle: first.title, milestone: { id: milestone.id, title: milestone.title } }]);
+    expect(linked.milestones.some(item => item.goalPlanId === second.id)).toBe(false);
+  });
+
   it('项目能关联同一份证据记录', () => {
     const plan = activePlan('项目目标');
-    const project = createOrLinkGoalProject({ title: '验收项目', goalPlanId: plan.id });
+    const project = createGoalProject({ title: '验收项目', goalPlanId: plan.id });
     const evidence = saveEvidence({
       text: '提交了验收材料。', source: '测试', reference: 'case-1', observedAt: new Date().toISOString(),
       links: ['task'], level: 'E2', reportSubmitted: true, latencyMs: null, benchmarkComplete: null,
@@ -65,17 +86,42 @@ describe('共享项目', () => {
     expect(listGoalProjects().find(item => item.id === project.id)?.evidence[0]).toMatchObject({ id: evidence.id, text: '更正后的验收材料。' });
   });
 
-  it('迁移已有任务上的项目名称并生成共享项目关联', () => {
-    const plan = activePlan('迁移目标');
-    const task = createGoalPlanAction({ goalPlanId: plan.id, title: '整理材料' });
+  it('迁移同名旧任务时按行创建独立项目，不跨目标按名称合并', () => {
+    const first = activePlan('迁移目标 A');
+    const second = activePlan('迁移目标 B');
+    const firstTask = createGoalPlanAction({ goalPlanId: first.id, title: '整理材料' });
+    const secondTask = createGoalPlanAction({ goalPlanId: second.id, title: '整理材料' });
     const database = new DatabaseSync(process.env.BUILDYOURSELF_DB!);
-    database.prepare('UPDATE goal_plan_actions SET project_name=?,project_id=NULL WHERE id=?').run('迁移项目', task.id);
+    database.prepare('UPDATE goal_plan_actions SET project_name=?,project_id=NULL WHERE id IN (?,?)').run('迁移项目', firstTask.id, secondTask.id);
+    database.prepare("DELETE FROM settings WHERE key='projectIdentityVersion'").run();
     database.close();
 
-    const migratedTask = listGoalPlanActions().find(action => action.id === task.id)!;
-    const project = listGoalProjects().find(item => item.id === migratedTask.projectId);
+    const migratedTasks = listGoalPlanActions().filter(action => [firstTask.id, secondTask.id].includes(action.id));
+    const projects = listGoalProjects().filter(item => migratedTasks.some(action => action.projectId === item.id));
 
-    expect(migratedTask.projectName).toBe('迁移项目');
-    expect(project).toMatchObject({ title: '迁移项目', goals: [{ goalPlanId: plan.id, title: '迁移目标' }] });
+    expect(migratedTasks).toHaveLength(2);
+    expect(migratedTasks.every(action => action.projectName === '迁移项目' && action.projectId)).toBe(true);
+    expect(new Set(migratedTasks.map(action => action.projectId)).size).toBe(2);
+    expect(projects.map(project => project.goals[0].goalPlanId).sort()).toEqual([first.id, second.id].sort());
+  });
+
+  it('拆分首版按名称误合并的项目时保留每个目标自己的项目副本', () => {
+    const first = activePlan('历史目标 A');
+    const second = activePlan('历史目标 B');
+    const project = createGoalProject({ title: '旧版共享项目', goalPlanId: first.id });
+    linkGoalProjectToGoal(project.id, { goalPlanId: second.id });
+    const firstTask = createGoalPlanAction({ goalPlanId: first.id, title: '目标 A 工作', projectId: project.id });
+    const secondTask = createGoalPlanAction({ goalPlanId: second.id, title: '目标 B 工作', projectId: project.id });
+    const database = new DatabaseSync(process.env.BUILDYOURSELF_DB!);
+    database.prepare("DELETE FROM settings WHERE key='projectIdentityVersion'").run();
+    database.close();
+
+    const tasks = listGoalPlanActions().filter(action => [firstTask.id, secondTask.id].includes(action.id));
+    const projects = listGoalProjects().filter(item => tasks.some(action => action.projectId === item.id));
+
+    expect(tasks.map(task => task.projectId)).toHaveLength(2);
+    expect(tasks[0].projectId).not.toBe(tasks[1].projectId);
+    expect(projects).toHaveLength(2);
+    expect(projects.map(item => item.goals[0].goalPlanId).sort()).toEqual([first.id, second.id].sort());
   });
 });

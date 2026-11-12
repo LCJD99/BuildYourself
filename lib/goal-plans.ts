@@ -131,6 +131,7 @@ export type GoalProject = {
 
 export type GoalPlanActionInput = {
   title: string;
+  projectId: string | null;
   projectName: string | null;
   details: string | null;
   deadline: string | null;
@@ -308,24 +309,102 @@ export function validateGoalPlan(plan: GoalPlanDraft): GoalPlanValidation {
 
 const goalPlanStatuses = "'draft', 'active', 'paused', 'completed', 'archived', 'abandoned'";
 
-function projectKey(title: string) {
-  return title.trim().normalize('NFKC').toLocaleLowerCase('zh-CN');
+function insertGoalProject(database: DatabaseSync, title: string, goalPlanId: string, now: string) {
+  const normalized = title.trim().normalize('NFKC');
+  if (!normalized) throw new Error('请填写项目名称');
+  const id = randomUUID();
+  // title_key remains unique for databases from the first project prototype; identity is now always the project ID.
+  database.prepare('INSERT INTO goal_projects (id,title,title_key,primary_goal_plan_id,created_at,updated_at) VALUES (?,?,?,?,?,?)')
+    .run(id, normalized, id, goalPlanId, now, now);
+  database.prepare('INSERT INTO goal_project_goals (project_id,goal_plan_id,linked_at) VALUES (?,?,?)')
+    .run(id, goalPlanId, now);
+  return id;
 }
 
-function ensureProjectForGoal(database: DatabaseSync, title: string, goalPlanId: string, now: string) {
-  const normalized = title.trim().normalize('NFKC');
-  const key = projectKey(normalized);
-  if (!key) throw new Error('请填写项目名称');
-  let row = database.prepare('SELECT id FROM goal_projects WHERE title_key=?').get(key) as { id: string } | undefined;
-  if (!row) {
-    const id = randomUUID();
-    database.prepare('INSERT INTO goal_projects (id,title,title_key,primary_goal_plan_id,created_at,updated_at) VALUES (?,?,?,?,?,?)')
-      .run(id, normalized, key, goalPlanId, now, now);
-    row = { id };
-  }
+function requireGoalProject(database: DatabaseSync, projectId: string) {
+  const project = database.prepare('SELECT id,title FROM goal_projects WHERE id=?').get(projectId) as { id: string; title: string } | undefined;
+  if (!project) throw new Error('找不到项目');
+  return project;
+}
+
+function associateGoalProject(database: DatabaseSync, projectId: string, goalPlanId: string, now: string) {
+  requireGoalProject(database, projectId);
+  ensureActiveGoalPlan(database, goalPlanId);
   database.prepare('INSERT OR IGNORE INTO goal_project_goals (project_id,goal_plan_id,linked_at) VALUES (?,?,?)')
-    .run(row.id, goalPlanId, now);
-  return row.id;
+    .run(projectId, goalPlanId, now);
+  database.prepare('UPDATE goal_projects SET updated_at=? WHERE id=?').run(now, projectId);
+}
+
+function migrateLegacyProjectLinks(database: DatabaseSync) {
+  const version = database.prepare("SELECT value FROM settings WHERE key='projectIdentityVersion'").get() as { value: string } | undefined;
+  if (version?.value === '2') return;
+
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const oldProjects = database.prepare('SELECT id,title,primary_goal_plan_id,created_at,updated_at FROM goal_projects').all() as Array<{
+      id: string; title: string; primary_goal_plan_id: string; created_at: string; updated_at: string;
+    }>;
+    const oldGoals = database.prepare('SELECT project_id,goal_plan_id,linked_at FROM goal_project_goals').all() as Array<{
+      project_id: string; goal_plan_id: string; linked_at: string;
+    }>;
+    const oldEvidence = database.prepare('SELECT project_id,evidence_id,linked_at FROM goal_project_evidence').all() as Array<{
+      project_id: string; evidence_id: string; linked_at: string;
+    }>;
+    const projectById = new Map(oldProjects.map(project => [project.id, project]));
+    const mappedProjectIds = new Map<string, string>();
+    const primaryProjectIds = new Map<string, string>();
+    const goalsByProject = new Map<string, Array<{ goalPlanId: string; linkedAt: string }>>();
+    for (const link of oldGoals) {
+      const goals = goalsByProject.get(link.project_id) ?? [];
+      goals.push({ goalPlanId: link.goal_plan_id, linkedAt: link.linked_at });
+      goalsByProject.set(link.project_id, goals);
+    }
+
+    for (const project of oldProjects) {
+      const goals = goalsByProject.get(project.id) ?? [];
+      if (!goals.some(goal => goal.goalPlanId === project.primary_goal_plan_id)) {
+        goals.unshift({ goalPlanId: project.primary_goal_plan_id, linkedAt: project.created_at });
+      }
+      for (const goal of goals) {
+        const newId = insertGoalProject(database, project.title, goal.goalPlanId, goal.linkedAt);
+        database.prepare('UPDATE goal_projects SET created_at=?,updated_at=? WHERE id=?').run(project.created_at, project.updated_at, newId);
+        mappedProjectIds.set(`${project.id}\0${goal.goalPlanId}`, newId);
+        if (goal.goalPlanId === project.primary_goal_plan_id) primaryProjectIds.set(project.id, newId);
+      }
+    }
+
+    const actions = database.prepare('SELECT id,goal_plan_id,project_id,project_name,created_at FROM goal_plan_actions').all() as Array<{
+      id: string; goal_plan_id: string; project_id: string | null; project_name: string | null; created_at: string;
+    }>;
+    for (const action of actions) {
+      let projectId = action.project_id
+        ? mappedProjectIds.get(`${action.project_id}\0${action.goal_plan_id}`)
+        : undefined;
+      if (!projectId && action.project_name?.trim()) {
+        const sourceProject = action.project_id ? projectById.get(action.project_id) : undefined;
+        projectId = insertGoalProject(database, sourceProject?.title ?? action.project_name, action.goal_plan_id, action.created_at);
+        mappedProjectIds.set(`${action.project_id ?? `task:${action.id}`}\0${action.goal_plan_id}`, projectId);
+      }
+      database.prepare('UPDATE goal_plan_actions SET project_id=? WHERE id=?').run(projectId ?? null, action.id);
+    }
+
+    for (const link of oldEvidence) {
+      const projectId = primaryProjectIds.get(link.project_id);
+      if (projectId) database.prepare('INSERT OR IGNORE INTO goal_project_evidence (project_id,evidence_id,linked_at) VALUES (?,?,?)')
+        .run(projectId, link.evidence_id, link.linked_at);
+    }
+    for (const project of oldProjects) {
+      database.prepare('DELETE FROM goal_project_milestones WHERE project_id=?').run(project.id);
+      database.prepare('DELETE FROM goal_project_evidence WHERE project_id=?').run(project.id);
+      database.prepare('DELETE FROM goal_project_goals WHERE project_id=?').run(project.id);
+      database.prepare('DELETE FROM goal_projects WHERE id=?').run(project.id);
+    }
+    database.prepare("INSERT INTO settings (key,value) VALUES ('projectIdentityVersion','2') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function createGoalPlansTable(database: ReturnType<typeof openDatabase>, tableName = 'goal_plans') {
@@ -428,6 +507,13 @@ function ensureSchema() {
       linked_at TEXT NOT NULL,
       PRIMARY KEY(project_id,evidence_id)
     );
+    CREATE TABLE IF NOT EXISTS goal_project_milestones (
+      project_id TEXT NOT NULL REFERENCES goal_projects(id) ON DELETE CASCADE,
+      goal_plan_id TEXT NOT NULL REFERENCES goal_plans(id) ON DELETE CASCADE,
+      milestone_id TEXT NOT NULL,
+      linked_at TEXT NOT NULL,
+      PRIMARY KEY(project_id,goal_plan_id,milestone_id)
+    );
   `);
   const schedulingColumns = new Set((database.prepare('PRAGMA table_info(goal_plan_actions)').all() as Array<{ name: string }>).map(column => column.name));
   if (!schedulingColumns.has('priority')) database.exec("ALTER TABLE goal_plan_actions ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium'");
@@ -458,12 +544,7 @@ function ensureSchema() {
   if (existingColumns.has('dependencies_json')) {
     database.exec("UPDATE goal_plan_actions SET dependency_ids=dependencies_json WHERE dependency_ids='[]' AND dependencies_json<>'[]'");
   }
-  const projectActions = database.prepare(`SELECT id,goal_plan_id,project_name FROM goal_plan_actions
-    WHERE project_name IS NOT NULL AND trim(project_name)<>'' AND project_id IS NULL`).all() as Array<{ id: string; goal_plan_id: string; project_name: string }>;
-  for (const action of projectActions) {
-    const projectId = ensureProjectForGoal(database, action.project_name, action.goal_plan_id, new Date().toISOString());
-    database.prepare('UPDATE goal_plan_actions SET project_id=? WHERE id=?').run(projectId, action.id);
-  }
+  migrateLegacyProjectLinks(database);
   return database;
 }
 
@@ -647,18 +728,28 @@ export function listGoalProjects(): GoalProject[] {
       FROM goal_project_goals g JOIN goal_plans p ON p.id=g.goal_plan_id ORDER BY p.created_at,p.id`).all() as Array<{
       project_id: string; goal_plan_id: string; plan_json: string; status: GoalPlanStatus;
     }>;
+    const milestoneLinks = database.prepare(`SELECT m.project_id,m.goal_plan_id,m.milestone_id,p.plan_json
+      FROM goal_project_milestones m JOIN goal_plans p ON p.id=m.goal_plan_id
+      ORDER BY m.linked_at,m.milestone_id`).all() as Array<{
+      project_id: string; goal_plan_id: string; milestone_id: string; plan_json: string;
+    }>;
     const evidenceLinks = database.prepare('SELECT project_id,evidence_id FROM goal_project_evidence').all() as Array<{ project_id: string; evidence_id: string }>;
     const evidence = readEvidence(database);
     const linksByProject = new Map<string, GoalProject['goals']>();
-    const milestonesByProject = new Map<string, GoalProject['milestones']>();
     for (const link of links) {
       const plan = JSON.parse(link.plan_json) as Partial<GoalPlanDraft>;
       const goals = linksByProject.get(link.project_id) ?? [];
       const goalTitle = plan.title || '未命名目标';
       goals.push({ goalPlanId: link.goal_plan_id, title: goalTitle, status: link.status });
       linksByProject.set(link.project_id, goals);
+    }
+    const milestonesByProject = new Map<string, GoalProject['milestones']>();
+    for (const link of milestoneLinks) {
+      const plan = JSON.parse(link.plan_json) as Partial<GoalPlanDraft>;
+      const milestone = plan.milestones?.find(item => item.id === link.milestone_id);
+      if (!milestone) continue;
       const milestones = milestonesByProject.get(link.project_id) ?? [];
-      for (const milestone of plan.milestones ?? []) milestones.push({ goalPlanId: link.goal_plan_id, goalTitle, milestone });
+      milestones.push({ goalPlanId: link.goal_plan_id, goalTitle: plan.title || '未命名目标', milestone });
       milestonesByProject.set(link.project_id, milestones);
     }
     const evidenceByProject = new Map<string, Set<string>>();
@@ -685,8 +776,8 @@ export function listGoalProjects(): GoalProject[] {
   }
 }
 
-export function createOrLinkGoalProject(input: unknown): GoalProject {
-  const value = object(input, '项目关联');
+export function createGoalProject(input: unknown): GoalProject {
+  const value = object(input, '新建项目');
   const title = nullableText(value.title, '项目名称', 240);
   const goalPlanId = typeof value.goalPlanId === 'string' ? value.goalPlanId : '';
   if (!title || !goalPlanId) throw new Error('请填写项目名称和目标');
@@ -694,13 +785,53 @@ export function createOrLinkGoalProject(input: unknown): GoalProject {
   try {
     database.exec('BEGIN IMMEDIATE');
     ensureActiveGoalPlan(database, goalPlanId);
-    const projectId = ensureProjectForGoal(database, title, goalPlanId, new Date().toISOString());
-    database.prepare('UPDATE goal_projects SET updated_at=? WHERE id=?').run(new Date().toISOString(), projectId);
+    const projectId = insertGoalProject(database, title, goalPlanId, new Date().toISOString());
     database.exec('COMMIT');
     return listGoalProjects().find(project => project.id === projectId)!;
   } catch (error) {
     try { database.exec('ROLLBACK'); } catch { /* transaction may already have ended */ }
     throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export function linkGoalProjectToGoal(projectId: string, input: unknown): GoalProject {
+  const value = object(input, '项目关联');
+  const goalPlanId = typeof value.goalPlanId === 'string' ? value.goalPlanId : '';
+  if (!goalPlanId) throw new Error('请选择目标');
+  const database = ensureSchema();
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    associateGoalProject(database, projectId, goalPlanId, new Date().toISOString());
+    database.exec('COMMIT');
+    return listGoalProjects().find(project => project.id === projectId)!;
+  } catch (error) {
+    try { database.exec('ROLLBACK'); } catch { /* transaction may already have ended */ }
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export function linkGoalProjectMilestone(projectId: string, input: unknown): GoalProject {
+  const value = object(input, '项目里程碑关联');
+  const goalPlanId = typeof value.goalPlanId === 'string' ? value.goalPlanId : '';
+  const milestoneId = typeof value.milestoneId === 'string' ? value.milestoneId : '';
+  if (!goalPlanId || !milestoneId) throw new Error('请选择目标和里程碑');
+  const database = ensureSchema();
+  try {
+    const project = requireGoalProject(database, projectId);
+    const row = database.prepare(`SELECT p.plan_json FROM goal_project_goals g
+      JOIN goal_plans p ON p.id=g.goal_plan_id WHERE g.project_id=? AND g.goal_plan_id=?`).get(projectId, goalPlanId) as { plan_json: string } | undefined;
+    if (!row) throw new Error('里程碑所属目标尚未关联到此项目');
+    const plan = JSON.parse(row.plan_json) as GoalPlanDraft;
+    const milestone = plan.milestones.find(item => item.id === milestoneId);
+    if (!milestone) throw new Error('找不到该目标下的里程碑');
+    database.prepare('INSERT OR IGNORE INTO goal_project_milestones (project_id,goal_plan_id,milestone_id,linked_at) VALUES (?,?,?,?)')
+      .run(projectId, goalPlanId, milestoneId, new Date().toISOString());
+    database.prepare('UPDATE goal_projects SET updated_at=? WHERE id=?').run(new Date().toISOString(), project.id);
+    return listGoalProjects().find(item => item.id === projectId)!;
   } finally {
     database.close();
   }
@@ -744,6 +875,7 @@ function normalizeGoalPlanActionInput(input: unknown, existing?: GoalPlanAction)
   }
   return {
     title,
+    projectId: nullableText(value.projectId === undefined ? existing?.projectId : value.projectId, '共享项目', 240),
     projectName: nullableText(value.projectName === undefined ? existing?.projectName : value.projectName, '项目名称', 240),
     details: nullableText(value.details === undefined ? existing?.details : value.details, '任务说明'),
     deadline: normalizeActionDeadline(value.deadline === undefined ? existing?.deadline : value.deadline),
@@ -1012,6 +1144,7 @@ function validateActionDependencies(database: DatabaseSync, goalPlanId: string, 
 }
 
 const actionFieldLabels: Array<[keyof GoalPlanActionInput, string]> = [
+  ['projectId', '共享项目记录'],
   ['projectName', '所属项目'],
   ['title', '任务名称'],
   ['details', '任务说明'],
@@ -1047,17 +1180,15 @@ export function createGoalPlanAction(input: unknown): GoalPlanAction {
     inTransaction = true;
     const goalPlan = ensureActiveGoalPlan(database, goalPlanId);
     validateActionDependencies(database, goalPlan.id, id, action.dependencyIds);
+    const project = action.projectId ? requireGoalProject(database, action.projectId) : null;
+    if (project) associateGoalProject(database, project.id, goalPlan.id, now);
     database.prepare(`INSERT INTO goal_plan_actions
-      (id,goal_plan_id,title,details,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?)`)
-      .run(id, goalPlan.id, action.title, action.details, action.projectName, action.deadline, action.estimateMinutes,
+      (id,goal_plan_id,title,details,project_id,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?)`)
+      .run(id, goalPlan.id, action.title, action.details, action.projectId, project?.title ?? action.projectName, action.deadline, action.estimateMinutes,
         JSON.stringify(action.dependencyIds), action.successCriteria, action.evidenceRequirement, now, now);
-    if (action.projectName) {
-      const projectId = ensureProjectForGoal(database, action.projectName, goalPlan.id, now);
-      database.prepare('UPDATE goal_plan_actions SET project_id=? WHERE id=?').run(projectId, id);
-    }
     const fieldChanges = actionFieldChanges(null, action);
-    recordTaskChange(database, 'task.created', { id, goalPlanId: goalPlan.id, title: action.title, projectName: action.projectName }, fieldChanges.map(change => change.field), now, fieldChanges);
+    recordTaskChange(database, 'task.created', { id, goalPlanId: goalPlan.id, title: action.title, projectName: project?.title ?? action.projectName }, fieldChanges.map(change => change.field), now, fieldChanges);
     database.exec('COMMIT');
     inTransaction = false;
   } catch (error) {
@@ -1086,6 +1217,7 @@ export function updateGoalPlanAction(id: string, input: unknown): GoalPlanAction
     validateActionDependencies(database, goalPlanId, id, next.dependencyIds);
     const previousFields: GoalPlanActionInput = {
       title: previous.title,
+      projectId: previous.projectId,
       projectName: previous.projectName,
       details: previous.details,
       deadline: previous.deadline,
@@ -1097,16 +1229,13 @@ export function updateGoalPlanAction(id: string, input: unknown): GoalPlanAction
     const fieldChanges = actionFieldChanges(previousFields, next);
     if (fieldChanges.length) {
       const updatedAt = new Date().toISOString();
-      database.prepare(`UPDATE goal_plan_actions SET title=?,details=?,project_name=?,deadline=?,estimate_minutes=?,dependency_ids=?,success_criteria=?,evidence_requirement=?,updated_at=? WHERE id=?`)
-        .run(next.title, next.details, next.projectName, next.deadline, next.estimateMinutes, JSON.stringify(next.dependencyIds),
+      const project = next.projectId ? requireGoalProject(database, next.projectId) : null;
+      if (project) associateGoalProject(database, project.id, goalPlanId, updatedAt);
+      const projectName = project?.title ?? next.projectName;
+      database.prepare(`UPDATE goal_plan_actions SET title=?,details=?,project_id=?,project_name=?,deadline=?,estimate_minutes=?,dependency_ids=?,success_criteria=?,evidence_requirement=?,updated_at=? WHERE id=?`)
+        .run(next.title, next.details, next.projectId, projectName, next.deadline, next.estimateMinutes, JSON.stringify(next.dependencyIds),
           next.successCriteria, next.evidenceRequirement, updatedAt, id);
-      if (next.projectName) {
-        const projectId = ensureProjectForGoal(database, next.projectName, goalPlanId, updatedAt);
-        database.prepare('UPDATE goal_plan_actions SET project_id=? WHERE id=?').run(projectId, id);
-      } else {
-        database.prepare('UPDATE goal_plan_actions SET project_id=NULL WHERE id=?').run(id);
-      }
-      recordTaskChange(database, 'task.updated', { id, goalPlanId, title: next.title, projectName: next.projectName }, fieldChanges.map(change => change.field), updatedAt, fieldChanges);
+      recordTaskChange(database, 'task.updated', { id, goalPlanId, title: next.title, projectName }, fieldChanges.map(change => change.field), updatedAt, fieldChanges);
     }
     database.exec('COMMIT');
     inTransaction = false;

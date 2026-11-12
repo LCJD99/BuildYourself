@@ -9,7 +9,7 @@ type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; 
 type LifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
 type TaskDraft = {
   title: string;
-  projectName: string;
+  projectId: string;
   details: string;
   deadline: string;
   estimateMinutes: string;
@@ -28,7 +28,7 @@ const eventLabels: Record<GoalPlanEventAction, string> = {
 };
 
 function emptyTaskDraft(): TaskDraft {
-  return { title: '', projectName: '', details: '', deadline: '', estimateMinutes: '', dependencyIds: [], successCriteria: '', evidenceRequirement: '' };
+  return { title: '', projectId: '', details: '', deadline: '', estimateMinutes: '', dependencyIds: [], successCriteria: '', evidenceRequirement: '' };
 }
 
 function formatDate(value: string | null) {
@@ -64,6 +64,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
   const [savingProposal, setSavingProposal] = useState(false);
   const [projectTitleDraft, setProjectTitleDraft] = useState('');
   const [projectSelection, setProjectSelection] = useState('');
+  const [milestoneSelection, setMilestoneSelection] = useState('');
   const [evidenceSelection, setEvidenceSelection] = useState('');
   const [editingProjectEvidenceId, setEditingProjectEvidenceId] = useState<string | null>(null);
   const [projectEvidenceDraft, setProjectEvidenceDraft] = useState<Evidence | null>(null);
@@ -240,10 +241,10 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
     );
   }
 
-  function beginTaskCreate(goalPlanId: string, projectName = '') {
+  function beginTaskCreate(goalPlanId: string, projectId = '') {
     setTaskGoalPlanId(goalPlanId);
     setEditingTaskId(null);
-    setTaskDraft({ ...emptyTaskDraft(), projectName });
+    setTaskDraft({ ...emptyTaskDraft(), projectId });
     setError('');
   }
 
@@ -252,7 +253,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
     setEditingTaskId(task.id);
     setTaskDraft({
       title: task.title,
-      projectName: task.projectName ?? '',
+      projectId: task.projectId ?? '',
       details: task.details ?? '',
       deadline: task.deadline ?? '',
       estimateMinutes: task.estimateMinutes?.toString() ?? '',
@@ -289,6 +290,46 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法关联项目');
+    } finally {
+      setSavingProjectLink(false);
+    }
+  }
+
+  async function linkExistingProjectToGoal(goalPlanId: string, projectId: string) {
+    setSavingProjectLink(true);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/goals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goalPlanId }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法关联项目');
+      setProjectSelection('');
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法关联项目');
+    } finally {
+      setSavingProjectLink(false);
+    }
+  }
+
+  async function linkMilestoneToProject(projectId: string) {
+    const [goalPlanId, milestoneId] = milestoneSelection.split(':');
+    if (!goalPlanId || !milestoneId) return;
+    setSavingProjectLink(true);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/milestones`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goalPlanId, milestoneId }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法关联里程碑');
+      setMilestoneSelection('');
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法关联里程碑');
     } finally {
       setSavingProjectLink(false);
     }
@@ -355,7 +396,8 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
         body: JSON.stringify({
           goalPlanId: taskGoalPlanId,
           title: taskDraft.title,
-          projectName: taskDraft.projectName,
+          projectId: taskDraft.projectId || null,
+          projectName: state.projects.find(project => project.id === taskDraft.projectId)?.title ?? null,
           details: taskDraft.details,
           deadline: taskDraft.deadline || null,
           estimateMinutes: taskDraft.estimateMinutes === '' ? null : Number(taskDraft.estimateMinutes),
@@ -441,7 +483,10 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
       <div className="task-editor-heading"><strong>{editingTaskId ? '编辑任务' : '新增任务'}</strong><span>任务归属：{plan.title}</span></div>
       <div className="task-editor-grid">
         <label>任务名称<input required maxLength={240} value={taskDraft.title} onChange={event => updateTaskDraft({ title: event.target.value })} /></label>
-        <label>所属项目（可选）<input maxLength={240} value={taskDraft.projectName} onChange={event => updateTaskDraft({ projectName: event.target.value })} /></label>
+        <label>关联共享项目（可选）<select value={taskDraft.projectId} onChange={event => updateTaskDraft({ projectId: event.target.value })}>
+          <option value="">不关联项目</option>
+          {state.projects.map(project => <option key={project.id} value={project.id}>{project.title} · {project.goals.find(goal => goal.goalPlanId === project.primaryGoalPlanId)?.title || '无目标'} · {project.id.slice(0, 6)}</option>)}
+        </select></label>
         <label>截止日期<input type="date" value={taskDraft.deadline} onChange={event => updateTaskDraft({ deadline: event.target.value })} /></label>
         <label>预计耗时（分钟）<input type="number" min="1" max="10080" step="1" value={taskDraft.estimateMinutes} onChange={event => updateTaskDraft({ estimateMinutes: event.target.value })} /></label>
         <label className="task-editor-wide">任务说明<textarea rows={2} value={taskDraft.details} onChange={event => updateTaskDraft({ details: event.target.value })} /></label>
@@ -478,9 +523,13 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
     const editorPlan = taskGoalPlanId ? projectPlans.find(plan => plan.id === taskGoalPlanId) : undefined;
     const linkedEvidenceIds = new Set(project.evidence.map(item => item.id));
     const availableEvidence = state.evidence.filter(item => !linkedEvidenceIds.has(item.id));
+    const linkedMilestoneKeys = new Set(project.milestones.map(({ goalPlanId, milestone }) => `${goalPlanId}:${milestone.id}`));
+    const availableMilestones = projectPlans.flatMap(plan => plan.milestones
+      .filter(milestone => !linkedMilestoneKeys.has(`${plan.id}:${milestone.id}`))
+      .map(milestone => ({ goalPlanId: plan.id, goalTitle: plan.title, milestone })));
     return <section className="project-workspace" aria-labelledby="project-workspace-title">
       <div className="project-workspace-heading">
-        <div><span className="kicker">SHARED PROJECT</span><h2 id="project-workspace-title">{project.title}</h2></div>
+        <div><span className="kicker">SHARED PROJECT</span><h2 id="project-workspace-title">{project.title}</h2><small className="project-id">项目 ID · {project.id}</small></div>
         <span className="subtle">多个入口共用同一份项目记录</span>
       </div>
       <div className="project-workspace-section">
@@ -491,7 +540,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
       </div>
       <div className="project-workspace-section">
         <div className="project-section-heading"><h3>共享任务 <span className="count">{projectActions.length}</span></h3>
-          {createTaskPlan && <button type="button" className="secondary-button" onClick={() => beginTaskCreate(createTaskPlan.id, project.title)}>新增任务</button>}
+          {createTaskPlan && <button type="button" className="secondary-button" onClick={() => beginTaskCreate(createTaskPlan.id, project.id)}>新增任务</button>}
         </div>
         {projectActions.length ? <div className="goal-task-list">{projectActions.map(action => (
           <article className="goal-task-card" key={action.id}>
@@ -506,7 +555,15 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
         {!editorPlan && taskGoalPlanId === createTaskPlan?.id && createTaskPlan && renderTaskEditor(createTaskPlan, state.actions.filter(action => action.goalPlanId === createTaskPlan.id))}
       </div>
       <div className="project-workspace-section">
-        <h3>关联里程碑 <span className="count">{project.milestones.length}</span></h3>
+        <div className="project-section-heading"><h3>关联里程碑 <span className="count">{project.milestones.length}</span></h3>
+          <div className="project-evidence-link">
+            <select aria-label="选择要关联的目标里程碑" value={milestoneSelection} disabled={savingProjectLink || !availableMilestones.length} onChange={event => setMilestoneSelection(event.target.value)}>
+              <option value="">{availableMilestones.length ? '选择目标里程碑' : '没有未关联的里程碑'}</option>
+              {availableMilestones.map(({ goalPlanId, goalTitle, milestone }) => <option key={`${goalPlanId}:${milestone.id}`} value={`${goalPlanId}:${milestone.id}`}>{goalTitle} · {milestone.title || '未命名里程碑'}</option>)}
+            </select>
+            <button type="button" className="secondary-button" disabled={!milestoneSelection || savingProjectLink} onClick={() => void linkMilestoneToProject(project.id)}>关联里程碑</button>
+          </div>
+        </div>
         {project.milestones.length ? <div className="project-milestones">{project.milestones.map(({ goalPlanId, goalTitle, milestone }) => <article className="goal-milestone" key={`${goalPlanId}-${milestone.id}`}>
           <div><span>{goalTitle} · {milestone.stage === 'near' ? '近期' : '远期'}</span><strong>{milestone.title || '未命名里程碑'}</strong></div>
           {milestone.successCriteria && <p>{milestone.successCriteria}</p>}
@@ -642,19 +699,19 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
             <div className="goal-subsection">
               <h4>共享项目入口</h4>
               {state.projects.filter(project => project.goals.some(goal => goal.goalPlanId === plan.id)).length ? <ul className="goal-evidence-requirements">
-                {state.projects.filter(project => project.goals.some(goal => goal.goalPlanId === plan.id)).map(project => <li key={project.id}><strong>{project.title}</strong> · {project.goals.length} 个关联目标</li>)}
+                {state.projects.filter(project => project.goals.some(goal => goal.goalPlanId === plan.id)).map(project => <li key={project.id}><strong>{project.title}</strong> · ID {project.id.slice(0, 6)} · {project.goals.length} 个关联目标</li>)}
               </ul> : <p className="goal-empty-inline">还没有关联共享项目。</p>}
               <div className="goal-project-link-controls">
                 <form onSubmit={event => { event.preventDefault(); if (projectTitleDraft.trim()) void linkProjectToGoal(plan.id, projectTitleDraft); }}>
                   <input aria-label={`为 ${plan.title} 创建或关联项目`} maxLength={240} placeholder="输入项目名称" value={projectTitleDraft} onChange={event => setProjectTitleDraft(event.target.value)} />
-                  <button className="secondary-button" type="submit" disabled={savingProjectLink || !projectTitleDraft.trim()}>{savingProjectLink ? '保存中…' : '创建或关联'}</button>
+                  <button className="secondary-button" type="submit" disabled={savingProjectLink || !projectTitleDraft.trim()}>{savingProjectLink ? '保存中…' : '新建项目'}</button>
                 </form>
                 {state.projects.some(project => !project.goals.some(goal => goal.goalPlanId === plan.id)) && <div>
                   <select aria-label={`选择要关联到 ${plan.title} 的项目`} value={projectSelection} onChange={event => setProjectSelection(event.target.value)}>
                     <option value="">关联已有项目</option>
-                    {state.projects.filter(project => !project.goals.some(goal => goal.goalPlanId === plan.id)).map(project => <option key={project.id} value={project.id}>{project.title}</option>)}
+                    {state.projects.filter(project => !project.goals.some(goal => goal.goalPlanId === plan.id)).map(project => <option key={project.id} value={project.id}>{project.title} · {project.goals.find(goal => goal.goalPlanId === project.primaryGoalPlanId)?.title || '无目标'} · {project.id.slice(0, 6)}</option>)}
                   </select>
-                  <button className="text-button" type="button" disabled={!projectSelection || savingProjectLink} onClick={() => { const project = state.projects.find(item => item.id === projectSelection); if (project) void linkProjectToGoal(plan.id, project.title); }}>关联</button>
+                  <button className="text-button" type="button" disabled={!projectSelection || savingProjectLink} onClick={() => void linkExistingProjectToGoal(plan.id, projectSelection)}>关联</button>
                 </div>}
               </div>
             </div>
