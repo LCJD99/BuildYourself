@@ -9,6 +9,7 @@ import { saveEvidence } from '../lib/store';
 import { correctEvidence } from '../lib/milestone-store';
 import { createProjectDeliverable, listProjectDeliverables, updateProjectDeliverable } from '../lib/project-deliverables';
 import { deriveProjectProgress } from '../lib/project-progress';
+import { assignProjectEvidenceToSeries, createProjectMeasurementSeries, listProjectMeasurementSeries } from '../lib/project-measurement-series';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-projects-'));
 beforeEach(() => { process.env.BUILDYOURSELF_DB = join(dir, `${randomUUID()}.sqlite`); });
@@ -100,19 +101,24 @@ describe('共享项目', () => {
       links: ['milestone'], goalPlanId: plan.id, goalActionId: action.id, level: 'E2', reportSubmitted: null, latencyMs: 350, benchmarkComplete: true,
     });
     linkGoalProjectEvidence(project.id, evidence.id);
+    const [latencySeries] = createProjectMeasurementSeries(project.id, {
+      name: '同一 staging 基准', basis: '相同工作负载、staging 环境和延迟字段。', confirmedComparable: true,
+    });
+    assignProjectEvidenceToSeries(project.id, latencySeries.id, evidence.id);
 
     const [sourceDeliverable] = createProjectDeliverable(project.id, { title: '源代码' });
     createProjectDeliverable(project.id, { title: '验收报告' });
     expect(() => createProjectDeliverable(project.id, { title: '源代码' })).toThrow('同名交付物');
     let linkedProject = listGoalProjects().find(item => item.id === project.id)!;
-    let model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id));
+    let model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id), listProjectMeasurementSeries(project.id));
     expect(model.deliverables).toMatchObject({ available: true, total: 2, completed: 0, percent: 0 });
-    expect(model.trend.observations).toEqual([expect.objectContaining({ id: evidence.id, value: 350 })]);
+    expect(model.trend.series[0].observations).toEqual([expect.objectContaining({ id: evidence.id, value: 350 })]);
+    expect(model.trend.series[0].firstToLastDeltaMs).toBeNull();
     expect(model.trend.applicableRule).toBeNull();
 
     updateProjectDeliverable(project.id, sourceDeliverable.id, { completed: true });
     expect(listProjectDeliverables(project.id)).toHaveLength(2);
-    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id));
+    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id), listProjectMeasurementSeries(project.id));
     expect(model.deliverables).toMatchObject({ completed: 1, total: 2, percent: 50 });
 
     correctEvidence(evidence.id, {
@@ -120,10 +126,55 @@ describe('共享项目', () => {
       observedAt: '2026-11-04T10:00:00.000Z', level: 'E1', latencyMs: 299,
     });
     linkedProject = listGoalProjects().find(item => item.id === project.id)!;
-    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id));
-    expect(model.trend.observations).toEqual([expect.objectContaining({ id: evidence.id, value: 299, source: '修订基准', reference: 'run-corrected', level: 'E1', observedAt: '2026-11-04T10:00:00.000Z' })]);
+    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id), listProjectMeasurementSeries(project.id));
+    expect(model.trend.series[0].observations).toEqual([]);
+    expect(model.trend.series[0].excludedEvidence).toEqual([expect.objectContaining({ id: evidence.id, canReconfirm: true })]);
+    assignProjectEvidenceToSeries(project.id, latencySeries.id, evidence.id);
+    linkedProject = listGoalProjects().find(item => item.id === project.id)!;
+    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id), listProjectMeasurementSeries(project.id));
+    expect(model.trend.series[0].observations).toEqual([expect.objectContaining({ id: evidence.id, value: 299, source: '修订基准', reference: 'run-corrected', level: 'E1', observedAt: '2026-11-04T10:00:00.000Z' })]);
     expect(model.evidence.sources).toEqual(['修订基准']);
     expect(model.milestones[0].evidenceIds).toEqual([evidence.id]);
+  });
+
+  it('只有用户确认口径并选入同一测量序列的证据才能形成趋势', () => {
+    const plan = activePlan('可比较测量目标');
+    const project = createGoalProject({ title: '同口径比较项目', goalPlanId: plan.id });
+    linkGoalProjectMilestone(project.id, { goalPlanId: plan.id, milestoneId: plan.milestones[0].id });
+    const initialAction = listGoalPlanActions(plan.id)[0];
+    updateGoalPlanAction(initialAction.id, { projectId: project.id });
+    const action = listGoalPlanActions(plan.id)[0];
+    const saveMeasurement = (source: string, reference: string, observedAt: string, latencyMs: number, text: string) => saveEvidence({
+      text, source, reference, observedAt, links: ['milestone'], goalPlanId: plan.id, goalActionId: action.id,
+      level: 'E2', reportSubmitted: null, latencyMs, benchmarkComplete: true,
+    });
+    const ciRun = saveMeasurement('CI', 'ci-run-1', '2026-11-01T10:00:00.000Z', 350, '工作负载 A；staging；版本 v1');
+    const manualRun = saveMeasurement('手工测试', 'manual-run-1', '2026-11-03T10:00:00.000Z', 324, '工作负载 A；staging；版本 v1');
+    const unrelatedRun = saveMeasurement('性能平台', 'perf-run-2', '2026-11-02T10:00:00.000Z', 120, '工作负载 B；本地环境；版本 v2');
+    for (const item of [ciRun, manualRun, unrelatedRun]) linkGoalProjectEvidence(project.id, item.id);
+
+    let linkedProject = listGoalProjects().find(item => item.id === project.id)!;
+    let model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id), listProjectMeasurementSeries(project.id));
+    expect(model.trend.unassignedObservations.map(item => item.id)).toHaveLength(3);
+    expect(model.trend.series).toEqual([]);
+    expect(() => createProjectMeasurementSeries(project.id, { name: '未确认序列', basis: '不确定', confirmedComparable: false })).toThrow('请确认');
+
+    const [comparisonSeries] = createProjectMeasurementSeries(project.id, {
+      name: '工作负载 A / staging / v1',
+      basis: '两条记录均使用工作负载 A、staging 环境及 v1 指标口径；数据来源不同但测试条件相同。',
+      confirmedComparable: true,
+    });
+    assignProjectEvidenceToSeries(project.id, comparisonSeries.id, ciRun.id);
+    assignProjectEvidenceToSeries(project.id, comparisonSeries.id, manualRun.id);
+    linkedProject = listGoalProjects().find(item => item.id === project.id)!;
+    model = deriveProjectProgress(linkedProject, listGoalPlanActions(), listProjectDeliverables(project.id), listProjectMeasurementSeries(project.id));
+
+    expect(model.trend.series[0]).toMatchObject({
+      name: '工作负载 A / staging / v1',
+      basis: '两条记录均使用工作负载 A、staging 环境及 v1 指标口径；数据来源不同但测试条件相同。',
+      evidenceIds: [ciRun.id, manualRun.id], firstToLastDeltaMs: -26,
+    });
+    expect(model.trend.unassignedObservations).toEqual([expect.objectContaining({ id: unrelatedRun.id, value: 120 })]);
   });
 
   it('迁移同名旧任务时按行创建独立项目，不跨目标按名称合并', () => {

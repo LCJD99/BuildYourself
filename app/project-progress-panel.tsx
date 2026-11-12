@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import type { GoalPlanAction, GoalProject } from '@/lib/goal-plans';
 import { deriveProjectProgress, type ProjectProgressModel, type ProjectProgressObservation, type ProjectProgressView } from '@/lib/project-progress';
 import type { ProjectDeliverable } from '@/lib/project-deliverables';
+import type { ProjectMeasurementSeries } from '@/lib/project-measurement-series';
 
 const viewLabels: Record<ProjectProgressView, string> = {
   evidence: '证据概览',
@@ -32,6 +33,7 @@ function TrendChart({ observations }: { observations: ProjectProgressObservation
       <strong>{observation.value} ms</strong>
       <span>{formatDateTime(observation.observedAt)} · {observation.level} · {observation.source}</span>
       <small>{observation.reference}</small>
+      <p>{observation.text}</p>
     </div>;
   }
 
@@ -58,20 +60,26 @@ function TrendChart({ observations }: { observations: ProjectProgressObservation
       </svg>
     </div>
     <ul className="project-trend-observations">{observations.map(item => <li key={item.id}>
-      <strong>{item.value} ms</strong><span>{formatDateTime(item.observedAt)} · {item.level} · {item.source}</span><small>{item.reference}</small>
+      <strong>{item.value} ms</strong><span>{formatDateTime(item.observedAt)} · {item.level} · {item.source}</span><small>{item.reference} · {item.text}</small>
     </li>)}</ul>
   </>;
 }
 
 export default function ProjectProgressPanel({ project, actions }: { project: GoalProject; actions: GoalPlanAction[] }) {
   const [deliverables, setDeliverables] = useState<ProjectDeliverable[]>([]);
+  const [measurementSeries, setMeasurementSeries] = useState<ProjectMeasurementSeries[]>([]);
   const [deliverableTitle, setDeliverableTitle] = useState('');
+  const [seriesName, setSeriesName] = useState('');
+  const [seriesBasis, setSeriesBasis] = useState('');
+  const [confirmedComparable, setConfirmedComparable] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [view, setView] = useState<ProjectProgressView>('evidence');
-  const model = deriveProjectProgress(project, actions, deliverables);
+  const [selectedSeriesId, setSelectedSeriesId] = useState('');
+  const model = deriveProjectProgress(project, actions, deliverables, measurementSeries);
+  const selectedSeries = model.trend.series.find(item => item.id === selectedSeriesId);
 
   useEffect(() => {
     let current = true;
@@ -82,6 +90,18 @@ export default function ProjectProgressPanel({ project, actions }: { project: Go
         if (current) setDeliverables(payload.deliverables ?? []);
       })
       .catch(cause => { if (current) setError(cause instanceof Error ? cause.message : '无法读取项目交付物'); });
+    return () => { current = false; };
+  }, [project.id]);
+
+  useEffect(() => {
+    let current = true;
+    void fetch(`/api/projects/${encodeURIComponent(project.id)}/measurement-series`)
+      .then(async response => {
+        const payload = await response.json() as { series?: ProjectMeasurementSeries[]; error?: string };
+        if (!response.ok) throw new Error(payload.error || '无法读取比较序列');
+        if (current) setMeasurementSeries(payload.series ?? []);
+      })
+      .catch(cause => { if (current) setError(cause instanceof Error ? cause.message : '无法读取比较序列'); });
     return () => { current = false; };
   }, [project.id]);
 
@@ -111,6 +131,60 @@ export default function ProjectProgressPanel({ project, actions }: { project: Go
     const title = deliverableTitle.trim();
     if (!title) return;
     if (await saveDeliverables(`/api/projects/${encodeURIComponent(project.id)}/deliverables`, 'POST', { title })) setDeliverableTitle('');
+  }
+
+  async function saveSeries(path: string, method: 'POST' | 'DELETE', body?: unknown): Promise<ProjectMeasurementSeries[] | null> {
+    setBusyId(path);
+    setError('');
+    try {
+      const response = await fetch(path, {
+        method,
+        ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+      });
+      const payload = await response.json() as { series?: ProjectMeasurementSeries[]; error?: string };
+      if (!response.ok) throw new Error(payload.error || '无法保存比较序列');
+      const nextSeries = payload.series ?? [];
+      setMeasurementSeries(nextSeries);
+      return nextSeries;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法保存比较序列');
+      return null;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function createSeries(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = seriesName.trim();
+    if (!name || !seriesBasis.trim() || !confirmedComparable) return;
+    const nextSeries = await saveSeries(`/api/projects/${encodeURIComponent(project.id)}/measurement-series`, 'POST', {
+      name, basis: seriesBasis, confirmedComparable,
+    });
+    const created = nextSeries?.find(item => item.name === name);
+    if (created) {
+      setSelectedSeriesId(created.id);
+      setSeriesName('');
+      setSeriesBasis('');
+      setConfirmedComparable(false);
+    }
+  }
+
+  function assignObservation(observationId: string) {
+    if (!selectedSeriesId) return;
+    void saveSeries(`/api/projects/${encodeURIComponent(project.id)}/measurement-series/${encodeURIComponent(selectedSeriesId)}/evidence`, 'POST', { evidenceId: observationId });
+  }
+
+  function reconfirmObservation(seriesId: string, observationId: string) {
+    void saveSeries(`/api/projects/${encodeURIComponent(project.id)}/measurement-series/${encodeURIComponent(seriesId)}/evidence`, 'POST', { evidenceId: observationId });
+  }
+
+  function removeObservation(seriesId: string, observationId: string) {
+    void saveSeries(`/api/projects/${encodeURIComponent(project.id)}/measurement-series/${encodeURIComponent(seriesId)}/evidence/${encodeURIComponent(observationId)}`, 'DELETE');
+  }
+
+  function deleteSeries(seriesId: string) {
+    void saveSeries(`/api/projects/${encodeURIComponent(project.id)}/measurement-series/${encodeURIComponent(seriesId)}`, 'DELETE');
   }
 
   return <section className="project-progress" aria-labelledby="project-progress-title">
@@ -152,10 +226,46 @@ export default function ProjectProgressPanel({ project, actions }: { project: Go
     </div>}
 
     {view === 'trend' && <div className="project-progress-trend">
-      <h4>完整基准延迟观测（ms）</h4>
-      <TrendChart observations={model.trend.observations} />
-      {model.trend.firstToLastDeltaMs !== null && <p className="project-progress-delta">首末观测差：{model.trend.firstToLastDeltaMs > 0 ? '+' : ''}{model.trend.firstToLastDeltaMs} ms</p>}
-      <p className="project-progress-gap">{model.trend.gap}</p>
+      <h4>延迟观测（ms）</h4>
+      <p className="project-progress-series-note">默认每条测量单独展示。只有在填写并确认相同工作负载、测试环境和指标口径后，手动加入同一序列的记录才会进行对比。</p>
+      <label className="project-progress-series-select">当前序列
+        <select aria-label="选择已确认的可比较测量序列" value={selectedSeriesId} onChange={event => setSelectedSeriesId(event.target.value)}>
+          <option value="">不比较观测</option>
+          {model.trend.series.map(item => <option key={item.id} value={item.id}>{item.name} · {item.observations.length} 次有效测量</option>)}
+        </select>
+      </label>
+      {selectedSeries && <div className="project-progress-selected-series">
+        <div className="project-progress-series-heading"><div><strong>{selectedSeries.name}</strong><span>口径说明：{selectedSeries.basis}</span><small>用户确认时间：{formatDateTime(selectedSeries.confirmedComparableAt)}</small></div>
+          <button type="button" disabled={Boolean(busyId)} onClick={() => deleteSeries(selectedSeries.id)}>删除此序列</button>
+        </div>
+        <TrendChart observations={selectedSeries.observations} />
+        {selectedSeries.firstToLastDeltaMs !== null && <p className="project-progress-delta">同一已确认口径的首末观测差：{selectedSeries.firstToLastDeltaMs > 0 ? '+' : ''}{selectedSeries.firstToLastDeltaMs} ms</p>}
+        {selectedSeries.gap && <p className="project-progress-gap">{selectedSeries.gap}</p>}
+        {selectedSeries.excludedEvidence.length > 0 && <div className="project-progress-series-excluded"><strong>未参与趋势的已关联证据</strong>{selectedSeries.excludedEvidence.map(item => <article key={item.id}>
+          <p>{item.reference} · {item.source}：{item.reason}</p><small>{item.text}</small>
+          {item.canReconfirm && <button type="button" disabled={Boolean(busyId)} onClick={() => reconfirmObservation(selectedSeries.id, item.id)}>核对后重新确认</button>}
+        </article>)}</div>}
+        {selectedSeries.observations.map(item => <div className="project-progress-series-member" key={item.id}>
+          <div><span>{item.reference} · {item.source} · {formatDateTime(item.observedAt)} · {item.level}</span><small>{item.text}</small></div>
+          <button type="button" disabled={Boolean(busyId)} onClick={() => removeObservation(selectedSeries.id, item.id)}>移出序列</button>
+        </div>)}
+      </div>}
+      {!selectedSeries && <p className="project-progress-gap">尚未选择比较序列；以下观测只逐条展示，不计算跨记录趋势或差值。</p>}
+      <div className="project-progress-unassigned">
+        <h5>未归入序列的单次观测</h5>
+        {model.trend.unassignedObservations.length ? model.trend.unassignedObservations.map(item => <article key={item.id}>
+          <div><strong>{item.value} ms · {item.reference}</strong><span>{item.source} · {item.level} · {formatDateTime(item.observedAt)}</span><small>{item.text}</small></div>
+          <button type="button" disabled={Boolean(busyId) || !selectedSeriesId} onClick={() => assignObservation(item.id)}>确认同口径并加入</button>
+        </article>) : <p className="project-progress-gap">没有未分组的完整延迟测量。</p>}
+      </div>
+      <form className="project-progress-series-form" onSubmit={event => void createSeries(event)}>
+        <h5>建立可比较序列</h5>
+        <label>序列名称<input required maxLength={100} value={seriesName} onChange={event => setSeriesName(event.target.value)} placeholder="例如：工作负载 A / staging / v1" /></label>
+        <label>比较口径说明<textarea required maxLength={1000} rows={2} value={seriesBasis} onChange={event => setSeriesBasis(event.target.value)} placeholder="说明工作负载、环境和指标定义为何相同" /></label>
+        <label className="project-progress-confirm-comparable"><input type="checkbox" checked={confirmedComparable} onChange={event => setConfirmedComparable(event.target.checked)} />我确认将加入此序列的测量使用相同工作负载、测试环境和指标口径。</label>
+        <button type="submit" disabled={Boolean(busyId) || !seriesName.trim() || !seriesBasis.trim() || !confirmedComparable}>创建已确认序列</button>
+      </form>
+      <p className="project-progress-gap">没有适用的结构化项目阈值。序列内差值只表示该口径下的数值变化，不代表达标或性能改善。</p>
     </div>}
 
     {view === 'deliverables' && <div className="project-progress-deliverables">

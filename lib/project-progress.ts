@@ -1,11 +1,13 @@
 import type { Evidence } from './model';
 import type { GoalPlanAction, GoalProject } from './goal-plans';
 import type { ProjectDeliverable } from './project-deliverables';
+import type { ProjectMeasurementSeries } from './project-measurement-series';
 
 export type ProjectProgressView = 'evidence' | 'milestones' | 'trend' | 'deliverables';
 
 export type ProjectProgressObservation = {
   id: string;
+  text: string;
   observedAt: string;
   value: number;
   source: string;
@@ -36,10 +38,18 @@ export type ProjectProgressModel = {
     gap: string;
   }>;
   trend: {
-    kind: 'empty' | 'single' | 'series';
-    observations: ProjectProgressObservation[];
-    firstToLastDeltaMs: number | null;
-    gap: string | null;
+    unassignedObservations: ProjectProgressObservation[];
+    series: Array<{
+      id: string;
+      name: string;
+      basis: string;
+      confirmedComparableAt: string;
+      evidenceIds: string[];
+      observations: ProjectProgressObservation[];
+      excludedEvidence: Array<{ id: string; reference: string; source: string; text: string; reason: string; canReconfirm: boolean }>;
+      firstToLastDeltaMs: number | null;
+      gap: string | null;
+    }>;
     applicableRule: null;
   };
 };
@@ -109,12 +119,14 @@ function makeMilestoneRows(project: GoalProject, actions: GoalPlanAction[]): Pro
   });
 }
 
-function makeTrend(evidence: Evidence[]): ProjectProgressModel['trend'] {
+function makeTrend(project: GoalProject, configuredSeries: ProjectMeasurementSeries[]): ProjectProgressModel['trend'] {
+  const evidence = project.evidence;
   const observations = evidence
     .filter(item => item.links.includes('milestone') && item.benchmarkComplete === true && typeof item.latencyMs === 'number' && Number.isFinite(item.latencyMs))
     .filter(item => timestamp(item.observedAt) !== null)
     .map(item => ({
       id: item.id,
+      text: item.text,
       observedAt: item.observedAt,
       value: item.latencyMs!,
       source: item.source,
@@ -122,21 +134,70 @@ function makeTrend(evidence: Evidence[]): ProjectProgressModel['trend'] {
       level: item.level,
     }))
     .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt) || a.id.localeCompare(b.id));
-  if (!observations.length) {
-    return { kind: 'empty', observations, firstToLastDeltaMs: null, gap: '尚无带有完整基准测试标记的延迟观测。没有可适用的结构化项目判定规则。', applicableRule: null };
-  }
-  if (observations.length === 1) {
-    return { kind: 'single', observations, firstToLastDeltaMs: null, gap: '目前只有一次观测，无法判断趋势；没有可适用的结构化项目判定规则。', applicableRule: null };
-  }
+  const observationsById = new Map(observations.map(item => [item.id, item]));
+  const projectSeries = configuredSeries.filter(item => item.projectId === project.id);
+  const assignedEvidenceIds = new Set(projectSeries.flatMap(item => item.evidence.map(assignment => assignment.evidenceId)));
+  const series = projectSeries.map(item => {
+    const excludedEvidence: ProjectProgressModel['trend']['series'][number]['excludedEvidence'] = [];
+    const seriesObservations = item.evidence.flatMap(assignment => {
+      const evidenceItem = evidence.find(candidate => candidate.id === assignment.evidenceId);
+      if (!evidenceItem) return [];
+      const correctionTime = timestamp(evidenceItem.lastCorrectedAt);
+      const confirmationTime = timestamp(assignment.confirmedAt);
+      if (correctionTime !== null && confirmationTime !== null && correctionTime > confirmationTime) {
+        const stillAComparableMeasurement = evidenceItem.links.includes('milestone') && evidenceItem.benchmarkComplete === true
+          && typeof evidenceItem.latencyMs === 'number' && Number.isFinite(evidenceItem.latencyMs)
+          && timestamp(evidenceItem.observedAt) !== null;
+        excludedEvidence.push({
+          id: assignment.evidenceId,
+          reference: evidenceItem.reference,
+          source: evidenceItem.source,
+          text: evidenceItem.text,
+          reason: '此证据在加入序列后被更正；请核对新内容并重新确认口径。',
+          canReconfirm: stillAComparableMeasurement,
+        });
+        return [];
+      }
+      const observation = observationsById.get(assignment.evidenceId);
+      if (!observation) {
+        excludedEvidence.push({
+          id: assignment.evidenceId,
+          reference: evidenceItem.reference,
+          source: evidenceItem.source,
+          text: evidenceItem.text,
+          reason: '更正后不再满足完整延迟观测条件，未纳入趋势。',
+          canReconfirm: false,
+        });
+      }
+      return observation ? [observation] : [];
+    }).sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt) || a.id.localeCompare(b.id));
+    const firstToLastDeltaMs = seriesObservations.length >= 2
+      ? seriesObservations[seriesObservations.length - 1].value - seriesObservations[0].value
+      : null;
+    const gap = seriesObservations.length >= 2 ? null
+      : excludedEvidence.length ? '部分已选证据经更正后不再是有效的完整延迟观测；当前有效观测不足两次，未计算差值。'
+        : seriesObservations.length === 1 ? '此口径当前只有一次有效观测，无法判断趋势或计算差值。'
+          : '此口径当前没有有效的完整延迟观测，未计算差值。';
+    return {
+      id: item.id,
+      name: item.name,
+      basis: item.basis,
+      confirmedComparableAt: item.confirmedComparableAt,
+      evidenceIds: item.evidence.map(assignment => assignment.evidenceId),
+      observations: seriesObservations,
+      excludedEvidence,
+      firstToLastDeltaMs,
+      gap,
+    };
+  });
   return {
-    kind: 'series', observations,
-    firstToLastDeltaMs: observations[observations.length - 1].value - observations[0].value,
-    gap: '此视图只呈现观测与首末变化；当前没有可适用的结构化项目判定规则，因此不判断达标与否。',
+    unassignedObservations: observations.filter(item => !assignedEvidenceIds.has(item.id)),
+    series,
     applicableRule: null,
   };
 }
 
-export function deriveProjectProgress(project: GoalProject, actions: GoalPlanAction[], deliverables: ProjectDeliverable[] = []): ProjectProgressModel {
+export function deriveProjectProgress(project: GoalProject, actions: GoalPlanAction[], deliverables: ProjectDeliverable[] = [], measurementSeries: ProjectMeasurementSeries[] = []): ProjectProgressModel {
   const completedDeliverables = deliverables.filter(item => item.completed).length;
   const hasFixedDenominator = deliverables.length > 0;
   return {
@@ -149,6 +210,6 @@ export function deriveProjectProgress(project: GoalProject, actions: GoalPlanAct
       reason: hasFixedDenominator ? null : '尚无已保存的固定交付物清单。添加明确交付物后，分母将固定为清单条目数；共享任务不会计入分母。',
     },
     milestones: makeMilestoneRows(project, actions),
-    trend: makeTrend(project.evidence),
+    trend: makeTrend(project, measurementSeries),
   };
 }

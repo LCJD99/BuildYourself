@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Evidence } from '../lib/model';
 import type { GoalPlanAction, GoalProject } from '../lib/goal-plans';
 import { deriveProjectProgress } from '../lib/project-progress';
+import type { ProjectMeasurementSeries } from '../lib/project-measurement-series';
 
 function evidence(overrides: Partial<Evidence> = {}): Evidence {
   return {
@@ -42,6 +43,15 @@ function action(overrides: Partial<GoalPlanAction> = {}): GoalPlanAction {
   };
 }
 
+function series(evidenceIds: string[], overrides: Partial<ProjectMeasurementSeries> = {}): ProjectMeasurementSeries {
+  return {
+    id: 'series-1', projectId: 'project-1', name: '相同负载基准', basis: '相同工作负载、环境和延迟口径',
+    confirmedComparableAt: '2026-11-02T00:00:00.000Z', createdAt: '2026-11-02T00:00:00.000Z',
+    updatedAt: '2026-11-02T00:00:00.000Z',
+    evidence: evidenceIds.map(evidenceId => ({ evidenceId, confirmedAt: '2026-11-02T00:00:00.000Z' })), ...overrides,
+  };
+}
+
 describe('项目进展视图的数据语义', () => {
   it('没有固定交付清单时不把任务完成数伪装成百分比', () => {
     const model = deriveProjectProgress(project(), [action()]);
@@ -66,7 +76,7 @@ describe('项目进展视图的数据语义', () => {
     expect(model.milestones[0].gap).toContain('尚未记录结构化的里程碑达成结果');
   });
 
-  it('只用完整基准测试构成观测序列，单次观测不套用全局阈值', () => {
+  it('无序列归属时把完整观测逐条展示，不计算趋势差值', () => {
     const model = deriveProjectProgress(project({
       milestones: [{
         goalPlanId: 'goal-1', goalTitle: '性能目标', milestone: {
@@ -82,24 +92,64 @@ describe('项目进展视图的数据语义', () => {
       ],
     }), [action()]);
 
-    expect(model.trend.observations).toEqual([expect.objectContaining({ id: 'single-e1', value: 350 })]);
-    expect(model.trend.kind).toBe('single');
-    expect(model.trend.gap).toContain('无法判断趋势');
+    expect(model.trend.unassignedObservations).toEqual([expect.objectContaining({ id: 'single-e1', value: 350 })]);
+    expect(model.trend.series).toEqual([]);
     expect(model.trend.applicableRule).toBeNull();
   });
 
-  it('多个同一结构化指标按实际观测时间稳定排序并只报告数值变化', () => {
+  it('即使字段相同，未明确分组的来源和条件也不跨记录比较', () => {
     const model = deriveProjectProgress(project({ evidence: [
-      evidence({ id: 'later', observedAt: '2026-11-03T10:00:00.000Z', createdAt: '2026-11-03T11:00:00.000Z', lastCorrectedAt: '2026-11-08T11:00:00.000Z', latencyMs: 324, level: 'E3' }),
-      evidence({ id: 'earlier', observedAt: '2026-11-01T10:00:00.000Z', latencyMs: 350, level: 'E2' }),
+      evidence({ id: 'workload-b', text: '工作负载 B，本地环境', source: '本地手工测试', reference: 'run-local', observedAt: '2026-11-03T10:00:00.000Z', latencyMs: 324, level: 'E3' }),
+      evidence({ id: 'workload-a', text: '工作负载 A，CI 环境', source: 'CI', reference: 'run-ci', observedAt: '2026-11-01T10:00:00.000Z', latencyMs: 350, level: 'E2' }),
     ] }), [action()]);
 
-    expect(model.trend.observations.map(item => item.id)).toEqual(['earlier', 'later']);
-    expect(model.trend.kind).toBe('series');
-    expect(model.trend.firstToLastDeltaMs).toBe(-26);
+    expect(model.trend.unassignedObservations.map(item => item.id)).toEqual(['workload-a', 'workload-b']);
+    expect(model.trend.series).toEqual([]);
     expect(model.trend.applicableRule).toBeNull();
-    expect(model.evidence.sources).toEqual(['测试报告']);
-    expect(model.evidence.updatedAt).toBe('2026-11-08T11:00:00.000Z');
+    expect(model.evidence.sources).toEqual(['CI', '本地手工测试']);
+  });
+
+  it('只在用户确认的同口径序列内计算趋势，并让未选记录保持单次展示', () => {
+    const report = project({ evidence: [
+      evidence({ id: 'comparable-later', text: '负载 A、staging、版本 v1', source: '手工测试', observedAt: '2026-11-03T10:00:00.000Z', latencyMs: 324 }),
+      evidence({ id: 'comparable-earlier', text: '负载 A、staging、版本 v1', source: 'CI', observedAt: '2026-11-01T10:00:00.000Z', latencyMs: 350 }),
+      evidence({ id: 'different-workload', text: '负载 B、本地环境、版本 v2', source: '性能平台', observedAt: '2026-11-02T10:00:00.000Z', latencyMs: 120 }),
+    ] });
+    const model = deriveProjectProgress(report, [action()], [], [series(['comparable-later', 'comparable-earlier'])]);
+
+    expect(model.trend.series[0]).toMatchObject({
+      name: '相同负载基准', basis: '相同工作负载、环境和延迟口径',
+      observations: [expect.objectContaining({ id: 'comparable-earlier' }), expect.objectContaining({ id: 'comparable-later' })],
+      firstToLastDeltaMs: -26, gap: null,
+    });
+    expect(model.trend.unassignedObservations).toEqual([expect.objectContaining({ id: 'different-workload', value: 120 })]);
+  });
+
+  it('其他项目的比较序列不会吸收或隐藏当前项目的观测', () => {
+    const report = project({ evidence: [evidence({ id: 'project-1-run' })] });
+    const model = deriveProjectProgress(report, [action()], [], [series(['project-1-run'], { projectId: 'project-2' })]);
+
+    expect(model.trend.series).toEqual([]);
+    expect(model.trend.unassignedObservations).toEqual([expect.objectContaining({ id: 'project-1-run', value: 350 })]);
+  });
+
+  it('归组记录更正后若不再是完整延迟测量，就不纳入差值', () => {
+    const report = project({ evidence: [
+      evidence({ id: 'valid', observedAt: '2026-11-01T10:00:00.000Z', latencyMs: 350 }),
+      evidence({ id: 'corrected-invalid', observedAt: '2026-11-02T10:00:00.000Z', lastCorrectedAt: '2026-11-03T10:00:00.000Z', latencyMs: 324, benchmarkComplete: false }),
+      evidence({ id: 'corrected-valid', observedAt: '2026-11-02T10:00:00.000Z', lastCorrectedAt: '2026-11-03T10:00:00.000Z', latencyMs: 324, benchmarkComplete: true }),
+    ] });
+    const model = deriveProjectProgress(report, [action()], [], [series(['valid', 'corrected-invalid', 'corrected-valid'])]);
+
+    expect(model.trend.series[0]).toMatchObject({
+      observations: [expect.objectContaining({ id: 'valid', value: 350 })],
+      excludedEvidence: [
+        expect.objectContaining({ id: 'corrected-invalid', reference: 'run-1', source: '测试报告', canReconfirm: false }),
+        expect.objectContaining({ id: 'corrected-valid', canReconfirm: true }),
+      ],
+      firstToLastDeltaMs: null,
+    });
+    expect(model.trend.series[0].gap).toContain('未计算差值');
   });
 
   it('仅按用户明确保存的交付物清单和状态计算确定分母', () => {
