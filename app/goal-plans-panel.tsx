@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
+import type { CompletionEvidence, GoalPlan, GoalPlanAction, GoalPlanEventAction, GoalPlanStatus, GoalProject, PendingGoalAction, ProposedGoalAction, TaskDecompositionProposal } from '@/lib/goal-plans';
+import type { Evidence } from '@/lib/model';
 import type { TaskChangeEvent } from '@/lib/milestone-store';
 
-type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[] };
+type GoalPlansState = { plans: GoalPlan[]; pendingActions: PendingGoalAction[]; actions: GoalPlanAction[]; taskChanges: TaskChangeEvent[]; taskProposals: TaskDecompositionProposal[]; projects: GoalProject[]; evidence: Evidence[] };
 type LifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
 type TaskDraft = {
   title: string;
@@ -48,8 +49,8 @@ function formatTaskChangeValue(value: unknown, actions: GoalPlanAction[]) {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
-export default function GoalPlansPanel({ focusActionId }: { focusActionId?: string | null }) {
-  const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [], actions: [], taskChanges: [], taskProposals: [] });
+export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { focusActionId?: string | null; selectedProjectId?: string | null }) {
+  const [state, setState] = useState<GoalPlansState>({ plans: [], pendingActions: [], actions: [], taskChanges: [], taskProposals: [], projects: [], evidence: [] });
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [completionPlanId, setCompletionPlanId] = useState<string | null>(null);
@@ -61,6 +62,12 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
   const [editingProposalId, setEditingProposalId] = useState<string | null>(null);
   const [proposalDraft, setProposalDraft] = useState<ProposedGoalAction[] | null>(null);
   const [savingProposal, setSavingProposal] = useState(false);
+  const [projectTitleDraft, setProjectTitleDraft] = useState('');
+  const [projectSelection, setProjectSelection] = useState('');
+  const [evidenceSelection, setEvidenceSelection] = useState('');
+  const [editingProjectEvidenceId, setEditingProjectEvidenceId] = useState<string | null>(null);
+  const [projectEvidenceDraft, setProjectEvidenceDraft] = useState<Evidence | null>(null);
+  const [savingProjectLink, setSavingProjectLink] = useState(false);
   const lastScrolledFocus = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -233,10 +240,10 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
     );
   }
 
-  function beginTaskCreate(goalPlanId: string) {
+  function beginTaskCreate(goalPlanId: string, projectName = '') {
     setTaskGoalPlanId(goalPlanId);
     setEditingTaskId(null);
-    setTaskDraft(emptyTaskDraft());
+    setTaskDraft({ ...emptyTaskDraft(), projectName });
     setError('');
   }
 
@@ -265,6 +272,75 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
     setEditingTaskId(null);
     setTaskDraft(null);
     setError('');
+  }
+
+  async function linkProjectToGoal(goalPlanId: string, title: string) {
+    setSavingProjectLink(true);
+    try {
+      const response = await fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, goalPlanId }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法关联项目');
+      setProjectTitleDraft('');
+      setProjectSelection('');
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法关联项目');
+    } finally {
+      setSavingProjectLink(false);
+    }
+  }
+
+  async function linkEvidenceToProject(projectId: string) {
+    if (!evidenceSelection) return;
+    setSavingProjectLink(true);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/evidence`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ evidenceId: evidenceSelection }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法关联证据');
+      setEvidenceSelection('');
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法关联证据');
+    } finally {
+      setSavingProjectLink(false);
+    }
+  }
+
+  function beginProjectEvidenceEdit(evidence: Evidence) {
+    const parsed = new Date(evidence.observedAt);
+    parsed.setMinutes(parsed.getMinutes() - parsed.getTimezoneOffset());
+    setEditingProjectEvidenceId(evidence.id);
+    setProjectEvidenceDraft({ ...evidence, observedAt: parsed.toISOString().slice(0, 16) });
+  }
+
+  async function saveProjectEvidence(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!projectEvidenceDraft) return;
+    setSavingProjectLink(true);
+    try {
+      const response = await fetch('/api/evidence', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...projectEvidenceDraft, observedAt: new Date(projectEvidenceDraft.observedAt).toISOString() }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法更正证据');
+      setEditingProjectEvidenceId(null);
+      setProjectEvidenceDraft(null);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法更正证据');
+    } finally {
+      setSavingProjectLink(false);
+    }
   }
 
   async function saveTask(event: React.FormEvent<HTMLFormElement>) {
@@ -359,10 +435,112 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
     }
   }
 
+  function renderTaskEditor(plan: GoalPlan, actions: GoalPlanAction[]) {
+    if (taskGoalPlanId !== plan.id || !taskDraft) return null;
+    return <form className="task-editor" onSubmit={event => void saveTask(event)}>
+      <div className="task-editor-heading"><strong>{editingTaskId ? '编辑任务' : '新增任务'}</strong><span>任务归属：{plan.title}</span></div>
+      <div className="task-editor-grid">
+        <label>任务名称<input required maxLength={240} value={taskDraft.title} onChange={event => updateTaskDraft({ title: event.target.value })} /></label>
+        <label>所属项目（可选）<input maxLength={240} value={taskDraft.projectName} onChange={event => updateTaskDraft({ projectName: event.target.value })} /></label>
+        <label>截止日期<input type="date" value={taskDraft.deadline} onChange={event => updateTaskDraft({ deadline: event.target.value })} /></label>
+        <label>预计耗时（分钟）<input type="number" min="1" max="10080" step="1" value={taskDraft.estimateMinutes} onChange={event => updateTaskDraft({ estimateMinutes: event.target.value })} /></label>
+        <label className="task-editor-wide">任务说明<textarea rows={2} value={taskDraft.details} onChange={event => updateTaskDraft({ details: event.target.value })} /></label>
+        <label className="task-editor-wide">完成标准<textarea rows={2} value={taskDraft.successCriteria} onChange={event => updateTaskDraft({ successCriteria: event.target.value })} /></label>
+        <label className="task-editor-wide">证据要求<textarea rows={2} value={taskDraft.evidenceRequirement} onChange={event => updateTaskDraft({ evidenceRequirement: event.target.value })} /></label>
+      </div>
+      <fieldset className="task-dependencies">
+        <legend>前置任务（可选）</legend>
+        {actions.filter(action => action.id !== editingTaskId).length ? actions.filter(action => action.id !== editingTaskId).map(action => (
+          <label key={action.id}><input type="checkbox" checked={taskDraft.dependencyIds.includes(action.id)} onChange={event => updateTaskDraft({ dependencyIds: event.target.checked ? [...taskDraft.dependencyIds, action.id] : taskDraft.dependencyIds.filter(id => id !== action.id) })} />{action.title}</label>
+        )) : <span>该目标下还没有其他任务。</span>}
+      </fieldset>
+      <div className="task-editor-actions">
+        <button type="button" className="secondary-button" disabled={savingTask} onClick={cancelTaskEdit}>取消</button>
+        <button type="submit" className="primary-button" disabled={savingTask}>{savingTask ? '保存中…' : '保存任务'}</button>
+      </div>
+    </form>;
+  }
+
   const active = state.plans.filter(plan => plan.status === 'active');
   const paused = state.plans.filter(plan => plan.status === 'paused');
   const ended = state.plans.filter(plan => ['completed', 'archived', 'abandoned'].includes(plan.status));
   const drafts = state.plans.filter(plan => plan.status === 'draft');
+  const selectedProject = state.projects.find(project => project.id === selectedProjectId);
+
+  if (selectedProjectId) {
+    const project = selectedProject;
+    if (!project) return <section className="project-workspace"><p>正在读取共享项目…</p></section>;
+    const linkedPlanIds = new Set(project.goals.map(goal => goal.goalPlanId));
+    const projectActions = state.actions.filter(action => action.projectId === project.id);
+    const projectPlans = state.plans.filter(plan => linkedPlanIds.has(plan.id));
+    const createTaskPlan = projectPlans.find(plan => plan.id === project.primaryGoalPlanId && plan.status === 'active')
+      ?? projectPlans.find(plan => plan.status === 'active');
+    const editorPlan = taskGoalPlanId ? projectPlans.find(plan => plan.id === taskGoalPlanId) : undefined;
+    const linkedEvidenceIds = new Set(project.evidence.map(item => item.id));
+    const availableEvidence = state.evidence.filter(item => !linkedEvidenceIds.has(item.id));
+    return <section className="project-workspace" aria-labelledby="project-workspace-title">
+      <div className="project-workspace-heading">
+        <div><span className="kicker">SHARED PROJECT</span><h2 id="project-workspace-title">{project.title}</h2></div>
+        <span className="subtle">多个入口共用同一份项目记录</span>
+      </div>
+      <div className="project-workspace-section">
+        <h3>关联目标</h3>
+        <div className="project-goal-links">{project.goals.map(goal => <span key={goal.goalPlanId} className={goal.goalPlanId === project.primaryGoalPlanId ? 'primary-project-goal' : ''}>
+          {goal.goalPlanId === project.primaryGoalPlanId ? '主要位置 · ' : '关联入口 · '}{goal.title} · {statusLabels[goal.status]}
+        </span>)}</div>
+      </div>
+      <div className="project-workspace-section">
+        <div className="project-section-heading"><h3>共享任务 <span className="count">{projectActions.length}</span></h3>
+          {createTaskPlan && <button type="button" className="secondary-button" onClick={() => beginTaskCreate(createTaskPlan.id, project.title)}>新增任务</button>}
+        </div>
+        {projectActions.length ? <div className="goal-task-list">{projectActions.map(action => (
+          <article className="goal-task-card" key={action.id}>
+            <div className="goal-task-card-head"><div><span className={`goal-task-status ${action.status}`}>{action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
+              <button type="button" className="edit-evidence-button" onClick={() => beginTaskEdit(action)}>编辑</button>
+            </div>
+            {action.details && <p className="goal-task-description">{action.details}</p>}
+            <dl className="goal-task-details"><dt>归属目标</dt><dd>{action.goalTitle}</dd><dt>截止日期</dt><dd>{formatDate(action.deadline)}</dd><dt>预计耗时</dt><dd>{action.estimateMinutes === null ? '未设置' : `${action.estimateMinutes} 分钟`}</dd><dt>完成标准</dt><dd>{action.successCriteria || '未设置'}</dd><dt>证据要求</dt><dd>{action.evidenceRequirement || '未设置'}</dd></dl>
+          </article>
+        ))}</div> : <p className="goal-empty-inline">项目还没有任务。可以从关联目标添加，任务会保存在此共享项目中。</p>}
+        {editorPlan && renderTaskEditor(editorPlan, state.actions.filter(action => action.goalPlanId === editorPlan.id))}
+        {!editorPlan && taskGoalPlanId === createTaskPlan?.id && createTaskPlan && renderTaskEditor(createTaskPlan, state.actions.filter(action => action.goalPlanId === createTaskPlan.id))}
+      </div>
+      <div className="project-workspace-section">
+        <h3>关联里程碑 <span className="count">{project.milestones.length}</span></h3>
+        {project.milestones.length ? <div className="project-milestones">{project.milestones.map(({ goalPlanId, goalTitle, milestone }) => <article className="goal-milestone" key={`${goalPlanId}-${milestone.id}`}>
+          <div><span>{goalTitle} · {milestone.stage === 'near' ? '近期' : '远期'}</span><strong>{milestone.title || '未命名里程碑'}</strong></div>
+          {milestone.successCriteria && <p>{milestone.successCriteria}</p>}
+          {milestone.reviewNote && <small className="goal-review-note">评估：{milestone.reviewNote}</small>}
+          {milestone.evidenceRequirement && <small>证据要求：{milestone.evidenceRequirement}</small>}
+        </article>)}</div> : <p className="goal-empty-inline">关联目标尚未记录里程碑。</p>}
+      </div>
+      <div className="project-workspace-section">
+        <div className="project-section-heading"><h3>共享证据 <span className="count">{project.evidence.length}</span></h3>
+          <div className="project-evidence-link">
+            <select aria-label="选择要关联的证据" value={evidenceSelection} disabled={savingProjectLink || !availableEvidence.length} onChange={event => setEvidenceSelection(event.target.value)}>
+              <option value="">{availableEvidence.length ? '选择已有证据' : '没有可关联的证据'}</option>
+              {availableEvidence.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.text.slice(0, 50)}</option>)}
+            </select>
+            <button type="button" className="secondary-button" disabled={!evidenceSelection || savingProjectLink} onClick={() => void linkEvidenceToProject(project.id)}>关联证据</button>
+          </div>
+        </div>
+        {project.evidence.length ? <div className="project-evidence-list">{project.evidence.map(item => <article key={item.id}>
+          {editingProjectEvidenceId === item.id && projectEvidenceDraft ? <form className="project-evidence-editor" onSubmit={event => void saveProjectEvidence(event)}>
+            <label>证据原文<textarea required rows={3} value={projectEvidenceDraft.text} onChange={event => setProjectEvidenceDraft(current => current ? { ...current, text: event.target.value } : current)} /></label>
+            <div><label>来源<input required value={projectEvidenceDraft.source} onChange={event => setProjectEvidenceDraft(current => current ? { ...current, source: event.target.value } : current)} /></label>
+              <label>引用<input required value={projectEvidenceDraft.reference} onChange={event => setProjectEvidenceDraft(current => current ? { ...current, reference: event.target.value } : current)} /></label>
+              <label>证据时间<input required type="datetime-local" value={projectEvidenceDraft.observedAt} onChange={event => setProjectEvidenceDraft(current => current ? { ...current, observedAt: event.target.value } : current)} /></label></div>
+            <p>更改会更新这份证据的所有关联结果。</p>
+            <div className="task-editor-actions"><button type="button" className="secondary-button" disabled={savingProjectLink} onClick={() => { setEditingProjectEvidenceId(null); setProjectEvidenceDraft(null); }}>取消</button><button type="submit" className="primary-button" disabled={savingProjectLink}>{savingProjectLink ? '保存中…' : '保存更正'}</button></div>
+          </form> : <>
+            <div><strong>{item.reference}</strong><span>{item.level} · {item.source} · {formatDateTime(item.observedAt)}</span></div><p>{item.text}</p>
+            <button type="button" className="edit-evidence-button" onClick={() => beginProjectEvidenceEdit(item)}>更正证据</button>
+          </>}
+        </article>)}</div> : <p className="goal-empty-inline">将已有证据关联到项目后，任一入口都会显示同一条记录。</p>}
+      </div>
+      {error && <p role="alert" className="error">{error}</p>}
+    </section>;
+  }
 
   return (
     <section className="goal-plans" aria-labelledby="goal-plans-title">
@@ -462,6 +640,25 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
               ))}
             </div>
             <div className="goal-subsection">
+              <h4>共享项目入口</h4>
+              {state.projects.filter(project => project.goals.some(goal => goal.goalPlanId === plan.id)).length ? <ul className="goal-evidence-requirements">
+                {state.projects.filter(project => project.goals.some(goal => goal.goalPlanId === plan.id)).map(project => <li key={project.id}><strong>{project.title}</strong> · {project.goals.length} 个关联目标</li>)}
+              </ul> : <p className="goal-empty-inline">还没有关联共享项目。</p>}
+              <div className="goal-project-link-controls">
+                <form onSubmit={event => { event.preventDefault(); if (projectTitleDraft.trim()) void linkProjectToGoal(plan.id, projectTitleDraft); }}>
+                  <input aria-label={`为 ${plan.title} 创建或关联项目`} maxLength={240} placeholder="输入项目名称" value={projectTitleDraft} onChange={event => setProjectTitleDraft(event.target.value)} />
+                  <button className="secondary-button" type="submit" disabled={savingProjectLink || !projectTitleDraft.trim()}>{savingProjectLink ? '保存中…' : '创建或关联'}</button>
+                </form>
+                {state.projects.some(project => !project.goals.some(goal => goal.goalPlanId === plan.id)) && <div>
+                  <select aria-label={`选择要关联到 ${plan.title} 的项目`} value={projectSelection} onChange={event => setProjectSelection(event.target.value)}>
+                    <option value="">关联已有项目</option>
+                    {state.projects.filter(project => !project.goals.some(goal => goal.goalPlanId === plan.id)).map(project => <option key={project.id} value={project.id}>{project.title}</option>)}
+                  </select>
+                  <button className="text-button" type="button" disabled={!projectSelection || savingProjectLink} onClick={() => { const project = state.projects.find(item => item.id === projectSelection); if (project) void linkProjectToGoal(plan.id, project.title); }}>关联</button>
+                </div>}
+              </div>
+            </div>
+            <div className="goal-subsection">
               <h4>证据要求</h4>
               <ul className="goal-evidence-requirements">{plan.evidenceRequirements.map(requirement => <li key={requirement.id}><strong>{requirement.minimumLevel}</strong> {requirement.item}：{requirement.description}</li>)}</ul>
             </div>
@@ -535,29 +732,7 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
                   </div>}
                 </section>
               ))}
-
-              {editingHere && taskDraft && <form className="task-editor" onSubmit={event => void saveTask(event)}>
-                <div className="task-editor-heading"><strong>{editingTaskId ? '编辑任务' : '新增任务'}</strong><span>任务归属：{plan.title}</span></div>
-                <div className="task-editor-grid">
-                  <label>任务名称<input required maxLength={240} value={taskDraft.title} onChange={event => updateTaskDraft({ title: event.target.value })} /></label>
-                  <label>所属项目（可选）<input maxLength={240} value={taskDraft.projectName} onChange={event => updateTaskDraft({ projectName: event.target.value })} /></label>
-                  <label>截止日期<input type="date" value={taskDraft.deadline} onChange={event => updateTaskDraft({ deadline: event.target.value })} /></label>
-                  <label>预计耗时（分钟）<input type="number" min="1" max="10080" step="1" value={taskDraft.estimateMinutes} onChange={event => updateTaskDraft({ estimateMinutes: event.target.value })} /></label>
-                  <label className="task-editor-wide">任务说明<textarea rows={2} value={taskDraft.details} onChange={event => updateTaskDraft({ details: event.target.value })} /></label>
-                  <label className="task-editor-wide">完成标准<textarea rows={2} value={taskDraft.successCriteria} onChange={event => updateTaskDraft({ successCriteria: event.target.value })} /></label>
-                  <label className="task-editor-wide">证据要求<textarea rows={2} value={taskDraft.evidenceRequirement} onChange={event => updateTaskDraft({ evidenceRequirement: event.target.value })} /></label>
-                </div>
-                <fieldset className="task-dependencies">
-                  <legend>前置任务（可选）</legend>
-                  {actions.filter(action => action.id !== editingTaskId && !action.decomposedAt).length ? actions.filter(action => action.id !== editingTaskId && !action.decomposedAt).map(action => (
-                    <label key={action.id}><input type="checkbox" checked={taskDraft.dependencyIds.includes(action.id)} onChange={event => updateTaskDraft({ dependencyIds: event.target.checked ? [...taskDraft.dependencyIds, action.id] : taskDraft.dependencyIds.filter(id => id !== action.id) })} />{action.title}</label>
-                  )) : <span>该目标下还没有其他任务。</span>}
-                </fieldset>
-                <div className="task-editor-actions">
-                  <button type="button" className="secondary-button" disabled={savingTask} onClick={cancelTaskEdit}>取消</button>
-                  <button type="submit" className="primary-button" disabled={savingTask}>{savingTask ? '保存中…' : '保存任务'}</button>
-                </div>
-              </form>}
+              {editingHere && renderTaskEditor(plan, actions)}
 
               <div className="task-change-log">
                 <h4>最近变更</h4>
