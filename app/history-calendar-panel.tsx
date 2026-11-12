@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { HistoryCalendar, HistoryCalendarDay } from '@/lib/history-calendar';
+import type { HistoryCalendar } from '@/lib/history-calendar';
+import { selectHistoryDay } from '@/lib/history-calendar-view';
 
 const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
 const goalStatusLabels = { active: '活跃', completed: '已完成', paused: '已暂停', archived: '已归档', abandoned: '已放弃', draft: '草稿' };
@@ -56,10 +57,11 @@ export default function HistoryCalendarPanel() {
     return [...Array.from({ length: offset }, () => null), ...Array.from({ length: count }, (_, index) => index + 1)];
   }, [month]);
   const monthTitle = new Date(month.year, month.month, 1).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' });
-  const selectedDay: HistoryCalendarDay | undefined = history?.days.find(day => day.date === selectedDate);
-  const activities = (selectedDay?.activities ?? []).filter(activity => !selectedGoalId || activity.goalPlanId === selectedGoalId);
-  const evidence = (selectedDay?.evidence ?? []).filter(item => !selectedGoalId || item.goalPlanId === selectedGoalId);
+  const selectedDay = history ? selectHistoryDay(history, selectedDate, selectedGoalId) : undefined;
+  const activities = selectedDay?.activities ?? [];
+  const evidence = selectedDay?.evidence ?? [];
   const filteredUndated = (history?.undatedActivities ?? []).filter(activity => !selectedGoalId || activity.goalPlanId === selectedGoalId);
+  const filteredUndatedEvidence = (history?.undatedEvidence ?? []).filter(evidence => !selectedGoalId || evidence.goalPlanId === selectedGoalId);
 
   function moveMonth(amount: number) {
     const next = new Date(month.year, month.month + amount, 1);
@@ -68,11 +70,7 @@ export default function HistoryCalendarPanel() {
   }
 
   function entriesForDate(date: string) {
-    const day = history?.days.find(item => item.date === date);
-    return {
-      activities: (day?.activities ?? []).filter(activity => !selectedGoalId || activity.goalPlanId === selectedGoalId),
-      evidence: (day?.evidence ?? []).filter(item => !selectedGoalId || item.goalPlanId === selectedGoalId),
-    };
+    return history ? selectHistoryDay(history, date, selectedGoalId) : undefined;
   }
 
   return (
@@ -98,9 +96,9 @@ export default function HistoryCalendarPanel() {
             if (day === null) return <span className="history-calendar-blank" aria-hidden="true" key={`blank-${index}`} />;
             const date = localDateKey(month.year, month.month, day);
             const entries = entriesForDate(date);
-            const hasEntries = entries.activities.length > 0 || entries.evidence.length > 0;
-            return <button type="button" role="gridcell" aria-pressed={selectedDate === date} aria-label={`${date}${hasEntries ? `，${entries.activities.length} 项活动，${entries.evidence.length} 项证据` : ''}`} className={`history-calendar-day${selectedDate === date ? ' selected' : ''}${hasEntries ? ' has-entry' : ''}`} key={date} onClick={() => setSelectedDate(date)}>
-              <span>{day}</span>{hasEntries && <small>{entries.activities.length + entries.evidence.length} 条</small>}
+            const hasEntries = (entries?.activities.length ?? 0) > 0 || (entries?.evidence.length ?? 0) > 0;
+            return <button type="button" role="gridcell" aria-pressed={selectedDate === date} aria-label={`${date}${hasEntries ? `，${entries!.activities.length} 项活动，${entries!.evidence.length} 项证据` : ''}`} className={`history-calendar-day${selectedDate === date ? ' selected' : ''}${hasEntries ? ' has-entry' : ''}`} key={date} onClick={() => setSelectedDate(date)}>
+              <span>{day}</span>{hasEntries && <small>{entries!.activities.length + entries!.evidence.length} 条</small>}
             </button>;
           })}
         </div>
@@ -112,13 +110,14 @@ export default function HistoryCalendarPanel() {
               {activity.evidenceRequirement && <small>证据要求：{activity.evidenceRequirement}</small>}
             </li>)}</ul></div>}
             {evidence.length > 0 && <div><h4>证据标记</h4><ul>{evidence.map(item => <li key={item.id}>
-              <strong><span className={`history-evidence-level ${item.level}`}>{item.level}</span> {item.requirement || '目标证据'}</strong>
-              <span>{item.goalTitle}</span><small>{item.description}</small>
+              <strong><span className={`history-evidence-level ${item.level}`}>{item.level}</span> {item.reference || item.requirement || '目标证据'}</strong>
+              <span>{item.goalTitle}{item.actionTitle ? ` · ${item.actionTitle}` : ''} · {timeLabel(item.observedAt)}</span><small>{item.source} · {item.description}</small>
             </li>)}</ul></div>}
           </> : <p className="history-calendar-empty">这一天没有已记录的目标活动或证据。</p>}
         </section>
       </div>
       {filteredUndated.length > 0 && <div className="history-undated"><strong>日期不详的旧完成记录（{filteredUndated.length}）</strong><p>这些旧记录没有保存实际完成时间，因此不会放入具体日期。</p><ul>{filteredUndated.map(item => <li key={item.id}>{item.goalTitle} · {item.title}</li>)}</ul></div>}
+      {filteredUndatedEvidence.length > 0 && <div className="history-undated"><strong>未记录实际发生时间的证据（{filteredUndatedEvidence.length}）</strong><p>这些证据仍关联到目标，但缺少 observedAt，因此不会标到某一天。</p><ul>{filteredUndatedEvidence.map(item => <li key={item.id}>{item.goalTitle}{item.actionTitle ? ` · ${item.actionTitle}` : ''} · {item.reference || item.requirement || item.description}</li>)}</ul></div>}
       <p className="history-calendar-note">只显示明确关联到具体目标的活动和证据。未关联目标的通用证据仍可在证据区查看，不计入目标历史。</p>
       {history?.goals.length === 0 && <p className="history-calendar-empty">启用目标并记录完成行动后，这里会显示目标历史。</p>}
     </section>

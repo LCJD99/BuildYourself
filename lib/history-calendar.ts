@@ -1,5 +1,5 @@
 import { listGoalPlans, type GoalPlan, type GoalPlanAction, type GoalPlanStatus } from './goal-plans';
-import { openDatabase } from './store';
+import { listEvidence, openDatabase } from './store';
 
 export type HistoryCalendarGoal = { id: string; title: string; status: GoalPlanStatus };
 export type HistoryCalendarActivity = {
@@ -15,9 +15,14 @@ export type HistoryCalendarEvidence = {
   id: string;
   goalPlanId: string;
   goalTitle: string;
+  goalActionId: string | null;
+  actionTitle: string | null;
   requirement: string | null;
   description: string;
   level: string;
+  observedAt: string;
+  reference: string;
+  source: string;
 };
 export type HistoryCalendarDay = {
   date: string;
@@ -25,7 +30,8 @@ export type HistoryCalendarDay = {
   evidence: HistoryCalendarEvidence[];
 };
 export type UndatedHistoryActivity = { id: string; goalPlanId: string; goalTitle: string; title: string };
-export type HistoryCalendar = { goals: HistoryCalendarGoal[]; days: HistoryCalendarDay[]; undatedActivities: UndatedHistoryActivity[] };
+export type UndatedHistoryEvidence = Omit<HistoryCalendarEvidence, 'observedAt'>;
+export type HistoryCalendar = { goals: HistoryCalendarGoal[]; days: HistoryCalendarDay[]; undatedActivities: UndatedHistoryActivity[]; undatedEvidence: UndatedHistoryEvidence[] };
 type CompletedGoalAction = Pick<GoalPlanAction, 'id' | 'goalPlanId' | 'goalTitle' | 'title' | 'completedAt' | 'evidenceRequirement'>;
 
 function dateKey(timestamp: string, timeZone: string): string | null {
@@ -63,10 +69,12 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
   new Intl.DateTimeFormat('en', { timeZone }).format(new Date(0));
   const plans = historyPlans(listGoalPlans());
   const goals = plans.map(plan => ({ id: plan.id, title: plan.title ?? '未命名目标', status: plan.status }));
-  if (!plans.length) return { goals, days: [], undatedActivities: [] };
+  if (!plans.length) return { goals, days: [], undatedActivities: [], undatedEvidence: [] };
 
   const database = openDatabase();
   let actions: CompletedGoalAction[];
+  const planById = new Map(plans.map(plan => [plan.id, plan]));
+  const actionTitles = new Map<string, string>();
   try {
     const ids = plans.map(plan => plan.id);
     const placeholders = ids.map(() => '?').join(',');
@@ -74,7 +82,8 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
       a.completed_at AS completedAt
       FROM goal_plan_actions a JOIN goal_plans p ON p.id=a.goal_plan_id
       WHERE a.status='done' AND a.goal_plan_id IN (${placeholders}) ORDER BY a.completed_at, a.id`).all(...ids) as Array<Record<string, unknown>>;
-    const planById = new Map(plans.map(plan => [plan.id, plan]));
+    const actionRows = database.prepare(`SELECT id, title FROM goal_plan_actions WHERE goal_plan_id IN (${placeholders})`).all(...ids) as Array<{ id: string; title: string }>;
+    for (const row of actionRows) actionTitles.set(row.id, row.title);
     actions = rows.map(row => {
       const plan = planById.get(String(row.goalPlanId))!;
       return {
@@ -90,10 +99,11 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
 
   const days = new Map<string, HistoryCalendarDay>();
   const undatedActivities: UndatedHistoryActivity[] = [];
+  const undatedEvidence: UndatedHistoryEvidence[] = [];
   const dayFor = (date: string) => {
     const existing = days.get(date);
     if (existing) return existing;
-    const day = { date, activities: [], evidence: [], unassignedEvidence: [] };
+    const day = { date, activities: [], evidence: [] };
     days.set(date, day);
     return day;
   };
@@ -102,6 +112,26 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
     const activity = activityForCompletedAction(action, timeZone);
     if (activity) dayFor(dateKey(activity.completedAt, timeZone)!).activities.push(activity);
     else undatedActivities.push({ id: action.id, goalPlanId: action.goalPlanId, goalTitle: action.goalTitle, title: action.title });
+  }
+
+  for (const evidence of listEvidence()) {
+    if (!evidence.goalPlanId || !planById.has(evidence.goalPlanId)) continue;
+    const plan = planById.get(evidence.goalPlanId)!;
+    const record = {
+      id: evidence.id,
+      goalPlanId: evidence.goalPlanId,
+      goalTitle: plan.title ?? '未命名目标',
+      goalActionId: evidence.goalActionId ?? null,
+      actionTitle: evidence.goalActionId ? actionTitles.get(evidence.goalActionId) ?? null : null,
+      requirement: null,
+      description: evidence.text,
+      level: evidence.level,
+      observedAt: evidence.observedAt,
+      reference: evidence.reference,
+      source: evidence.source,
+    };
+    const date = dateKey(record.observedAt, timeZone);
+    if (date) dayFor(date).evidence.push(record);
   }
 
   for (const plan of plans) {
@@ -120,14 +150,22 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
       });
       for (const [index, evidence] of (event.evidence ?? []).entries()) {
         const requirement = plan.evidenceRequirements.find(item => item.id === evidence.requirementId);
-        day.evidence.push({
+        const record = {
           id: `${event.id}:${index}`,
           goalPlanId: plan.id,
           goalTitle: plan.title ?? '未命名目标',
+          goalActionId: null,
+          actionTitle: null,
           requirement: requirement?.item ?? null,
           description: evidence.description,
           level: evidence.level,
-        });
+          reference: requirement?.item ?? '目标完成证据',
+          source: '目标完成核对',
+        };
+        const observedAt = evidence.observedAt;
+        const evidenceDate = observedAt ? dateKey(observedAt, timeZone) : null;
+        if (observedAt && evidenceDate) dayFor(evidenceDate).evidence.push({ ...record, observedAt });
+        else undatedEvidence.push(record);
       }
     }
   }
@@ -135,6 +173,7 @@ export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
   return {
     goals,
     undatedActivities,
+    undatedEvidence,
     days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)).map(day => ({
       ...day,
       activities: day.activities.sort((a, b) => a.completedAt.localeCompare(b.completedAt) || a.id.localeCompare(b.id)),

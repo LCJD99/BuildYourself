@@ -15,6 +15,8 @@ export function openDatabase() {
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
   const columns = d.prepare('PRAGMA table_info(evidence)').all() as { name: string }[];
   if (!columns.some(column => column.name === 'level')) d.exec("ALTER TABLE evidence ADD COLUMN level TEXT NOT NULL DEFAULT 'E1'");
+  if (!columns.some(column => column.name === 'goal_plan_id')) d.exec('ALTER TABLE evidence ADD COLUMN goal_plan_id TEXT');
+  if (!columns.some(column => column.name === 'goal_action_id')) d.exec('ALTER TABLE evidence ADD COLUMN goal_action_id TEXT');
   return d;
 }
 const validId = (id: unknown): id is NodeId => nodes.some(n => n.id === id);
@@ -69,6 +71,8 @@ export function readEvidence(database: DatabaseSync): Evidence[] {
       observedAt:String(r.observed_at),
       createdAt:String(r.created_at),
       links:nodes.filter(node=>linked.has(node.id)).map(node=>node.id),
+      goalPlanId:r.goal_plan_id === null || r.goal_plan_id === undefined ? null : String(r.goal_plan_id),
+      goalActionId:r.goal_action_id === null || r.goal_action_id === undefined ? null : String(r.goal_action_id),
       level:isEvidenceLevel(r.level)?r.level:'E1',
       reportSubmitted:r.report_submitted===null?null:Boolean(r.report_submitted),
       latencyMs:r.latency_ms===null?null:Number(r.latency_ms),
@@ -86,6 +90,11 @@ export function validateEvidenceInput(input: unknown): EvidenceInput {
   const v=input as Record<string,unknown>;
   if (typeof v.text!=='string' || !v.text.trim() || typeof v.source!=='string' || !v.source.trim() || typeof v.reference!=='string' || !v.reference.trim() || typeof v.observedAt!=='string' || !Number.isFinite(Date.parse(v.observedAt))) throw new Error('请填写证据原文、来源、引用和有效时间');
   if (!Array.isArray(v.links) || !v.links.length || !v.links.every(validId) || new Set(v.links).size !== v.links.length) throw new Error('请选择有效的关联对象');
+  const goalPlanId = v.goalPlanId === undefined || v.goalPlanId === null || v.goalPlanId === '' ? null : typeof v.goalPlanId === 'string' ? v.goalPlanId.trim() : (()=>{throw new Error('目标关联无效')})();
+  const goalActionId = v.goalActionId === undefined || v.goalActionId === null || v.goalActionId === '' ? null : typeof v.goalActionId === 'string' ? v.goalActionId.trim() : (()=>{throw new Error('行动关联无效')})();
+  if (goalPlanId !== null && (!goalPlanId || goalPlanId.length > 100)) throw new Error('目标关联无效');
+  if (goalActionId !== null && (!goalActionId || goalActionId.length > 100)) throw new Error('行动关联无效');
+  if (goalActionId && !goalPlanId) throw new Error('关联行动时必须同时选择目标');
   const level:EvidenceLevel = v.level === undefined ? 'E1' : isEvidenceLevel(v.level) ? v.level : (()=>{throw new Error('请选择有效的证据等级')})();
   if (![true,false,null].includes(v.reportSubmitted as boolean|null) || ![true,false,null].includes(v.benchmarkComplete as boolean|null) || !(v.latencyMs === null || (typeof v.latencyMs === 'number' && Number.isFinite(v.latencyMs) && v.latencyMs >= 0))) throw new Error('无效的核对结果');
   return {
@@ -94,6 +103,8 @@ export function validateEvidenceInput(input: unknown): EvidenceInput {
     reference: v.reference,
     observedAt: new Date(v.observedAt).toISOString(),
     links: [...v.links] as NodeId[],
+    goalPlanId,
+    goalActionId,
     level,
     reportSubmitted: v.reportSubmitted as boolean | null,
     latencyMs: v.latencyMs as number | null,
@@ -101,8 +112,44 @@ export function validateEvidenceInput(input: unknown): EvidenceInput {
   };
 }
 export function saveEvidence(input: unknown): Evidence {
-  const v=validateEvidenceInput(input);
-  const id=randomUUID(), createdAt=new Date().toISOString(); const d=openDatabase();
-  try {d.exec('BEGIN IMMEDIATE'); d.prepare('INSERT INTO evidence (id,text,source,reference,observed_at,created_at,report_submitted,latency_ms,benchmark_complete,level) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,v.text,v.source,v.reference,v.observedAt,createdAt,v.reportSubmitted===null?null:Number(v.reportSubmitted),v.latencyMs,v.benchmarkComplete===null?null:Number(v.benchmarkComplete),v.level); const insert=d.prepare('INSERT INTO evidence_links VALUES (?,?)'); for(const link of v.links) insert.run(id,link); d.exec('COMMIT');} catch(e) {d.exec('ROLLBACK'); throw e;} finally {d.close();}
-  return listEvidence().find(e=>e.id===id)!;
+  const value = validateEvidenceInput(input);
+  const id = randomUUID();
+  const createdAt = new Date().toISOString();
+  const database = openDatabase();
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    validateEvidenceAssociation(database, value.goalPlanId ?? null, value.goalActionId ?? null);
+    database.prepare(`INSERT INTO evidence
+      (id,text,source,reference,observed_at,created_at,report_submitted,latency_ms,benchmark_complete,level,goal_plan_id,goal_action_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, value.text, value.source, value.reference, value.observedAt, createdAt,
+        value.reportSubmitted === null ? null : Number(value.reportSubmitted), value.latencyMs,
+        value.benchmarkComplete === null ? null : Number(value.benchmarkComplete), value.level,
+        value.goalPlanId ?? null, value.goalActionId ?? null);
+    const insertLink = database.prepare('INSERT INTO evidence_links VALUES (?,?)');
+    for (const link of value.links) insertLink.run(id, link);
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+  return listEvidence().find(item => item.id === id)!;
+}
+
+export function validateEvidenceAssociation(database: DatabaseSync, goalPlanId: string | null, goalActionId: string | null) {
+  if (!goalPlanId) {
+    if (goalActionId) throw new Error('关联行动时必须同时选择目标');
+    return;
+  }
+  const plansTable = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='goal_plans'").get();
+  if (!plansTable) throw new Error('所选目标不存在或尚未启用');
+  const plan = database.prepare('SELECT status FROM goal_plans WHERE id=?').get(goalPlanId) as { status: string } | undefined;
+  if (!plan || plan.status === 'draft') throw new Error('所选目标不存在或尚未启用');
+  if (!goalActionId) return;
+  const actionsTable = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='goal_plan_actions'").get();
+  if (!actionsTable) throw new Error('所选行动不属于该目标');
+  const action = database.prepare('SELECT goal_plan_id FROM goal_plan_actions WHERE id=?').get(goalActionId) as { goal_plan_id: string } | undefined;
+  if (!action || action.goal_plan_id !== goalPlanId) throw new Error('所选行动不属于该目标');
 }

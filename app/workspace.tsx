@@ -21,6 +21,7 @@ import CommitmentsPanel from './commitments-panel';
 import ProjectNavigation from './project-navigation';
 import type { GoalProject } from '@/lib/goal-plans';
 import HistoryCalendarPanel from './history-calendar-panel';
+import type { GoalEvidenceTarget } from '@/lib/goal-plans';
 
 type Graph = {
   evidence: Evidence[];
@@ -56,6 +57,8 @@ const revisionFields: Array<{ key: keyof EvidenceSnapshot; label: string }> = [
   { key: 'reference', label: '引用' },
   { key: 'observedAt', label: '证据时间' },
   { key: 'links', label: '关联对象' },
+  { key: 'goalPlanId', label: '所属目标' },
+  { key: 'goalActionId', label: '所属行动' },
   { key: 'level', label: '证据等级' },
   { key: 'reportSubmitted', label: '报告是否已提交' },
   { key: 'benchmarkComplete', label: '完整基准测试' },
@@ -73,8 +76,10 @@ function dateTimeInput(value: string) {
   return parsed.toISOString().slice(0, 16);
 }
 
-function revisionValue(key: keyof EvidenceSnapshot, value: EvidenceSnapshot[keyof EvidenceSnapshot]) {
-  if (value === null) return '未说明';
+function revisionValue(key: keyof EvidenceSnapshot, value: EvidenceSnapshot[keyof EvidenceSnapshot], targets: GoalEvidenceTarget[]) {
+  if (value === null || value === undefined) return '未说明';
+  if (key === 'goalPlanId' && typeof value === 'string') return targets.find(target => target.id === value)?.title ?? value;
+  if (key === 'goalActionId' && typeof value === 'string') return targets.flatMap(target => target.actions).find(action => action.id === value)?.title ?? value;
   if (key === 'links' && Array.isArray(value)) return value.map(id => labels[id as NodeId]).join('、');
   if (key === 'reportSubmitted' || key === 'benchmarkComplete') return value ? '是' : '否';
   if (key === 'observedAt' && typeof value === 'string') return date(value);
@@ -90,6 +95,7 @@ export default function Workspace() {
   const [celebrating, setCelebrating] = useState(false);
   const [editingEvidence, setEditingEvidence] = useState<string | null>(null);
   const [evidenceDraft, setEvidenceDraft] = useState<Evidence | null>(null);
+  const [evidenceTargets, setEvidenceTargets] = useState<GoalEvidenceTarget[]>([]);
   const [dailyPlanRecord, setDailyPlanRecord] = useState<DailyPlanRecord>({ plan: null, status: null, confirmedAt: null, updatedAt: null });
   const [dailyPlanRevision, setDailyPlanRevision] = useState(0);
   const [focusedAction, setFocusedAction] = useState<WeeklyPlan['days'][number]['actions'][number] | null>(null);
@@ -98,10 +104,15 @@ export default function Workspace() {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await fetch('/api/graph', { cache: 'no-store' });
-      if (!response.ok) throw Error();
+      const [response, targetsResponse] = await Promise.all([
+        fetch('/api/graph', { cache: 'no-store' }),
+        fetch('/api/evidence/targets', { cache: 'no-store' }),
+      ]);
+      if (!response.ok || !targetsResponse.ok) throw Error();
       const data: Graph = await response.json();
+      const targetsData = await targetsResponse.json() as { targets: GoalEvidenceTarget[] };
       setGraph(data);
+      setEvidenceTargets(targetsData.targets);
       setError('');
     } catch {
       setError('无法读取本地图谱，请检查应用服务。');
@@ -353,6 +364,17 @@ export default function Workspace() {
                         {nodes.map(node => <label key={node.id}><input type="checkbox" checked={evidenceDraft.links.includes(node.id)} onChange={event => updateEvidenceDraft({ links: event.target.checked ? [...evidenceDraft.links, node.id] : evidenceDraft.links.filter(id => id !== node.id) })} />{node.type}：{node.title}</label>)}
                       </fieldset>
                       <div className="evidence-edit-grid">
+                        <label>目标归属（用于目标历史）<select value={evidenceDraft.goalPlanId ?? ''} onChange={event => updateEvidenceDraft({ goalPlanId: event.target.value || null, goalActionId: null })}>
+                          <option value="">不关联具体目标</option>
+                          {evidenceTargets.map(target => <option key={target.id} value={target.id}>{target.title}（{target.status}）</option>)}
+                        </select></label>
+                        {evidenceDraft.goalPlanId && <label>行动归属（可选）<select value={evidenceDraft.goalActionId ?? ''} onChange={event => updateEvidenceDraft({ goalActionId: event.target.value || null })}>
+                          <option value="">整个目标</option>
+                          {evidenceTargets.find(target => target.id === evidenceDraft.goalPlanId)?.actions.map(action => <option key={action.id} value={action.id}>{action.title}（{action.status === 'done' ? '已完成' : action.status === 'scheduled' ? '已安排' : '待排'}）</option>)}
+                        </select></label>}
+                        <small className="evidence-association-note">只有明确关联到具体目标的证据才进入该目标的历史日历。</small>
+                      </div>
+                      <div className="evidence-edit-grid">
                         {evidenceDraft.links.includes('task') && <label>报告是否已提交<select value={evidenceDraft.reportSubmitted === null ? 'unknown' : evidenceDraft.reportSubmitted ? 'yes' : 'no'} onChange={event => updateEvidenceDraft({ reportSubmitted: event.target.value === 'unknown' ? null : event.target.value === 'yes' })}><option value="unknown">证据未说明</option><option value="yes">是</option><option value="no">否</option></select></label>}
                         {evidenceDraft.links.includes('milestone') && <>
                           <label>是否完成完整基准测试<select value={evidenceDraft.benchmarkComplete === null ? 'unknown' : evidenceDraft.benchmarkComplete ? 'yes' : 'no'} onChange={event => updateEvidenceDraft({ benchmarkComplete: event.target.value === 'unknown' ? null : event.target.value === 'yes' })}><option value="unknown">证据未说明</option><option value="yes">是</option><option value="no">否</option></select></label>
@@ -369,14 +391,14 @@ export default function Workspace() {
                     {Boolean(evidence.lastCorrectedAt) && <div className="evidence-revision-time">最近更正：{date(evidence.lastCorrectedAt!)}</div>}
                     <p>{evidence.text}</p>
                     <div className="evidence-foot">来源：{evidence.source} · 引用：{evidence.reference}</div>
-                    <div className="tags">{evidence.links.map(id => <span key={id}>{labels[id]}</span>)}</div>
+                    <div className="tags">{evidence.links.map(id => <span key={id}>{labels[id]}</span>)}<span>{evidence.goalPlanId ? `目标：${evidenceTargets.find(target => target.id === evidence.goalPlanId)?.title ?? '已关联目标'}` : '未关联具体目标'}</span>{evidence.goalActionId && <span>行动：{evidenceTargets.flatMap(target => target.actions).find(action => action.id === evidence.goalActionId)?.title ?? '已关联行动'}</span>}</div>
                     {Boolean(evidence.revisions?.length) && <details className="evidence-history">
                       <summary>查看更正记录（{evidence.revisions!.length}）</summary>
                       <ol>{evidence.revisions!.map((revision, revisionIndex) => {
                         const changedFields = revisionFields.filter(({ key }) => JSON.stringify(revision.before[key]) !== JSON.stringify(revision.after[key]));
                         return <li key={`${revision.changedAt}-${revisionIndex}`}>
                           <time>{date(revision.changedAt)}</time>
-                          {changedFields.map(({ key, label }) => <p key={key}><strong>{label}</strong><span>原：{revisionValue(key, revision.before[key])}</span><span>更正为：{revisionValue(key, revision.after[key])}</span></p>)}
+                          {changedFields.map(({ key, label }) => <p key={key}><strong>{label}</strong><span>原：{revisionValue(key, revision.before[key], evidenceTargets)}</span><span>更正为：{revisionValue(key, revision.after[key], evidenceTargets)}</span></p>)}
                         </li>;
                       })}</ol>
                     </details>}

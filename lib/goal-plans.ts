@@ -53,7 +53,7 @@ export type GoalPlanDraft = {
 };
 
 export type GoalPlanValidation = { ready: boolean; issues: string[] };
-export type CompletionEvidence = { requirementId: string; description: string; level: EvidenceLevel };
+export type CompletionEvidence = { requirementId: string; description: string; level: EvidenceLevel; observedAt?: string };
 export type GoalPlanEventAction = 'created' | 'activated' | 'paused' | 'resumed' | 'completion_requested' | 'completion_cancelled' | 'completion_confirmed' | 'archived' | 'abandoned' | 'imported';
 type GoalPlanLifecycleAction = 'pause' | 'resume' | 'archive' | 'abandon' | 'request_completion' | 'cancel_completion' | 'confirm_completion';
 export type GoalPlanEvent = {
@@ -718,6 +718,39 @@ export function listGoalPlanActions(goalPlanId?: string): GoalPlanAction[] {
   }
 }
 
+export type GoalEvidenceTarget = {
+  id: string;
+  title: string;
+  status: GoalPlanStatus;
+  actions: Array<{ id: string; title: string; status: GoalPlanAction['status'] }>;
+};
+
+export function listGoalEvidenceTargets(): GoalEvidenceTarget[] {
+  const plans = listGoalPlans().filter(plan => plan.status !== 'draft');
+  if (!plans.length) return [];
+  const database = ensureSchema();
+  try {
+    const ids = plans.map(plan => plan.id);
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = database.prepare(`SELECT id, goal_plan_id, title, status FROM goal_plan_actions
+      WHERE goal_plan_id IN (${placeholders}) ORDER BY created_at, id`).all(...ids) as Array<{ id: string; goal_plan_id: string; title: string; status: GoalPlanAction['status'] }>;
+    const actions = new Map<string, GoalEvidenceTarget['actions']>();
+    for (const row of rows) {
+      const goalActions = actions.get(row.goal_plan_id) ?? [];
+      goalActions.push({ id: row.id, title: row.title, status: row.status });
+      actions.set(row.goal_plan_id, goalActions);
+    }
+    return plans.map(plan => ({
+      id: plan.id,
+      title: plan.title ?? '未命名目标',
+      status: plan.status,
+      actions: actions.get(plan.id) ?? [],
+    }));
+  } finally {
+    database.close();
+  }
+}
+
 export function listPendingGoalActions(): PendingGoalAction[] {
   return listGoalPlanActions().filter((action): action is PendingGoalAction => action.status === 'pending_schedule' && !action.decomposedAt);
 }
@@ -1340,8 +1373,13 @@ function normalizeCompletionEvidence(plan: GoalPlanDraft, input: unknown): Compl
     const requirementId = nullableText(item.requirementId, '证据要求 ID', 100);
     const description = nullableText(item.description, '证据内容或位置', 2000);
     const level = choice(item.level, evidenceLevels, 'E1', '证据等级');
+    const observedAt = item.observedAt === undefined || item.observedAt === null || item.observedAt === ''
+      ? undefined
+      : typeof item.observedAt === 'string' && Number.isFinite(Date.parse(item.observedAt))
+        ? new Date(item.observedAt).toISOString()
+        : (() => { throw new Error(`第 ${index + 1} 项证据时间无效。`); })();
     if (!requirementId || !description) throw new Error(`第 ${index + 1} 项证据需要填写内容或位置。`);
-    return { requirementId, description, level };
+    return { requirementId, description, level, ...(observedAt ? { observedAt } : {}) };
   });
   if (!plan.evidenceRequirements.length || plan.evidenceRequirements.some(requirement => !requirement.id || !requirement.minimumLevel)) {
     throw new Error('目标尚未设置完整的完成证据条件。');

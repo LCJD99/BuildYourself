@@ -7,6 +7,12 @@ import { openDatabase, saveEvidence } from '../lib/store';
 import { confirmDailyPlan, generateAndSaveDailyPlan, getDailyPlan } from '../lib/daily-plan-store';
 import { activateGoalPlan, listGoalPlanActions, markGoalPlanActionDone, saveGoalPlanDraft, transitionGoalPlan, updateGoalPlanAction } from '../lib/goal-plans';
 import { getHistoryCalendar } from '../lib/history-calendar';
+import { filterHistoryDay, selectHistoryDay } from '../lib/history-calendar-view';
+import { correctEvidence } from '../lib/milestone-store';
+import { saveExternalCommitment } from '../lib/commitments';
+import { GET as getEvidenceTargets } from '../app/api/evidence/targets/route';
+import { PATCH as patchEvidence, POST as postEvidence } from '../app/api/evidence/route';
+import { GET as getHistoryCalendarRoute } from '../app/api/history-calendar/route';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-history-calendar-'));
 beforeEach(() => { process.env.BUILDYOURSELF_DB = join(dir, `${randomUUID()}.sqlite`); });
@@ -39,7 +45,7 @@ describe('只读历史日历', () => {
 
     transitionGoalPlan(draft.id, {
       action: 'request_completion',
-      evidence: [{ requirementId: draft.evidenceRequirements[0].id, description: '导师确认录音表达清晰。', level: 'E3' }],
+      evidence: [{ requirementId: draft.evidenceRequirements[0].id, description: '导师确认录音表达清晰。', level: 'E3', observedAt: '2026-11-04T01:00:00.000Z' }],
     });
     transitionGoalPlan(draft.id, { action: 'confirm_completion', confirmed: true });
 
@@ -49,22 +55,31 @@ describe('只读历史日历', () => {
       date: '2026-11-03',
       activities: [expect.objectContaining({ kind: 'action', goalPlanId: draft.id, title: '录制英文介绍' })],
     }));
-    const completionDay = history.days.find(day => day.activities.some(activity => activity.kind === 'goal_completed'));
-    expect(completionDay?.evidence).toEqual([expect.objectContaining({ level: 'E3', description: '导师确认录音表达清晰。' })]);
+    const evidenceDay = history.days.find(day => day.evidence.some(item => item.description === '导师确认录音表达清晰。'));
+    expect(evidenceDay?.date).toBe('2026-11-03');
+    expect(evidenceDay?.evidence).toEqual([expect.objectContaining({ level: 'E3', description: '导师确认录音表达清晰。', observedAt: '2026-11-04T01:00:00.000Z' })]);
   });
 
   it('保留暂停目标的历史活动并排除草稿目标', () => {
     const paused = saveGoalPlanDraft(completePlan('后来暂停的目标'));
+    const archived = saveGoalPlanDraft(completePlan('后来归档的目标'));
     activateGoalPlan(paused.id);
+    activateGoalPlan(archived.id);
     const action = listGoalPlanActions(paused.id)[0];
+    const archivedAction = listGoalPlanActions(archived.id)[0];
     markGoalPlanActionDone(action.id);
+    markGoalPlanActionDone(archivedAction.id);
     transitionGoalPlan(paused.id, { action: 'pause', reason: '暂缓投入' });
+    transitionGoalPlan(archived.id, { action: 'pause', reason: '暂缓投入' });
+    transitionGoalPlan(archived.id, { action: 'archive', reason: '目标已归档' });
     const draft = saveGoalPlanDraft(completePlan('尚未启用的目标'));
 
     const history = getHistoryCalendar();
     expect(history.goals).toContainEqual(expect.objectContaining({ id: paused.id, status: 'paused' }));
+    expect(history.goals).toContainEqual(expect.objectContaining({ id: archived.id, status: 'archived' }));
     expect(history.goals.map(goal => goal.id)).not.toContain(draft.id);
     expect(history.days.flatMap(day => day.activities)).toContainEqual(expect.objectContaining({ goalPlanId: paused.id, title: action.title }));
+    expect(history.days.flatMap(day => day.activities)).toContainEqual(expect.objectContaining({ goalPlanId: archived.id, title: archivedAction.title }));
   });
 
   it('保存独立完成时间，后续编辑不会把行动移到另一天', () => {
@@ -106,8 +121,125 @@ describe('只读历史日历', () => {
       links: ['task'], level: 'E2', reportSubmitted: true, benchmarkComplete: null, latencyMs: null,
     });
 
+    saveExternalCommitment({
+      sourceText: '普通外部日程', deliverable: '家庭聚会', deadline: null, goalPlanId: null,
+      tasks: [{ title: '参加聚会', details: null, deadline: null, estimateMinutes: 60, dependencies: [], acceptanceCriteria: null }],
+      uncertainFields: [
+        { field: 'deadline', taskIndex: 0, reason: '日程没有明确截止时间' },
+        { field: 'acceptanceCriteria', taskIndex: 0, reason: '普通日程没有任务验收要求' },
+      ],
+    });
     const history = getHistoryCalendar();
     expect(history.days).toEqual([]);
+  });
+
+  it('显式关联到目标行动的证据按 observedAt 入日历，并可按目标和日期筛选', () => {
+    const firstGoal = saveGoalPlanDraft(completePlan('目标一'));
+    const secondGoal = saveGoalPlanDraft(completePlan('目标二'));
+    activateGoalPlan(firstGoal.id);
+    activateGoalPlan(secondGoal.id);
+    const firstAction = listGoalPlanActions(firstGoal.id)[0];
+    const evidence = saveEvidence({
+      text: '录音确认表达清晰', source: '导师反馈', reference: 'audio-review', observedAt: '2026-11-04T01:00:00.000Z',
+      links: ['task'], goalPlanId: firstGoal.id, goalActionId: firstAction.id,
+      level: 'E3', reportSubmitted: null, benchmarkComplete: null, latencyMs: null,
+    });
+
+    const history = getHistoryCalendar('America/Los_Angeles');
+    const filtered = filterHistoryDay(history.days.find(day => day.date === '2026-11-03'), firstGoal.id);
+    expect(filtered?.evidence).toEqual([expect.objectContaining({
+      id: evidence.id, goalPlanId: firstGoal.id, goalActionId: firstAction.id,
+      actionTitle: firstAction.title, observedAt: evidence.observedAt,
+    })]);
+    expect(filterHistoryDay(history.days.find(day => day.date === '2026-11-03'), secondGoal.id)?.evidence).toEqual([]);
+    expect(filterHistoryDay(history.days.find(day => day.date === '2026-11-04'), firstGoal.id)).toBeUndefined();
+  });
+
+  it('更正证据归属或 observedAt 后，历史按新目标和新日期回查', () => {
+    const firstGoal = saveGoalPlanDraft(completePlan('目标一'));
+    const secondGoal = saveGoalPlanDraft(completePlan('目标二'));
+    activateGoalPlan(firstGoal.id);
+    activateGoalPlan(secondGoal.id);
+    const firstAction = listGoalPlanActions(firstGoal.id)[0];
+    const secondAction = listGoalPlanActions(secondGoal.id)[0];
+    const evidence = saveEvidence({
+      text: '录音确认表达清晰', source: '导师反馈', reference: 'audio-review', observedAt: '2026-11-04T01:00:00.000Z',
+      links: ['task'], goalPlanId: firstGoal.id, goalActionId: firstAction.id,
+      level: 'E3', reportSubmitted: null, benchmarkComplete: null, latencyMs: null,
+    });
+
+    const corrected = correctEvidence(evidence.id, {
+      ...evidence, observedAt: '2026-11-06T12:00:00.000Z', goalPlanId: secondGoal.id, goalActionId: secondAction.id,
+    });
+    expect(corrected.changed).toBe(true);
+    expect(corrected.evidence.revisions?.[0].before).toMatchObject({ goalPlanId: firstGoal.id, goalActionId: firstAction.id });
+    expect(corrected.evidence.revisions?.[0].after).toMatchObject({ goalPlanId: secondGoal.id, goalActionId: secondAction.id });
+    const history = getHistoryCalendar('America/Los_Angeles');
+    expect(filterHistoryDay(history.days.find(day => day.date === '2026-11-03'), firstGoal.id)).toBeUndefined();
+    expect(filterHistoryDay(history.days.find(day => day.date === '2026-11-06'), secondGoal.id)?.evidence).toEqual([
+      expect.objectContaining({ id: evidence.id, goalActionId: secondAction.id, observedAt: '2026-11-06T12:00:00.000Z' }),
+    ]);
+  });
+
+  it('拒绝把行动证据关联到另一个目标的行动', () => {
+    const firstGoal = saveGoalPlanDraft(completePlan('目标一'));
+    const secondGoal = saveGoalPlanDraft(completePlan('目标二'));
+    activateGoalPlan(firstGoal.id);
+    activateGoalPlan(secondGoal.id);
+    const secondAction = listGoalPlanActions(secondGoal.id)[0];
+    expect(() => saveEvidence({
+      text: '证据', source: '用户', reference: 'note', observedAt: '2026-11-04T01:00:00.000Z',
+      links: ['task'], goalPlanId: firstGoal.id, goalActionId: secondAction.id,
+      level: 'E1', reportSubmitted: null, benchmarkComplete: null, latencyMs: null,
+    })).toThrow('不属于该目标');
+  });
+
+  it('通过证据 API 选择目标和行动、保存并更正后可在历史日历中回查', async () => {
+    const firstGoal = saveGoalPlanDraft(completePlan('目标一'));
+    const secondGoal = saveGoalPlanDraft(completePlan('目标二'));
+    activateGoalPlan(firstGoal.id);
+    activateGoalPlan(secondGoal.id);
+    const firstAction = listGoalPlanActions(firstGoal.id)[0];
+    const secondAction = listGoalPlanActions(secondGoal.id)[0];
+
+    const targetsResponse = getEvidenceTargets();
+    const { targets } = await targetsResponse.json() as { targets: Array<{ id: string; actions: Array<{ id: string }> }> };
+    expect(targets.map(target => target.id)).toEqual(expect.arrayContaining([firstGoal.id, secondGoal.id]));
+    expect(targets.find(target => target.id === firstGoal.id)?.actions.map(action => action.id)).toContain(firstAction.id);
+
+    const posted = await postEvidence(new Request('http://localhost/api/evidence', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: '导师确认表达清晰', source: '导师反馈', reference: 'audio-review', observedAt: '2026-11-04T01:00:00.000Z',
+        links: ['task'], goalPlanId: firstGoal.id, goalActionId: firstAction.id,
+        level: 'E3', reportSubmitted: null, benchmarkComplete: null, latencyMs: null,
+      }),
+    }));
+    expect(posted.status).toBe(201);
+    const evidence = await posted.json() as { id: string };
+
+    const beforeCorrectionResponse = await getHistoryCalendarRoute(new Request('http://localhost/api/history-calendar?timeZone=America%2FLos_Angeles'));
+    const beforeCorrection = await beforeCorrectionResponse.json() as Awaited<ReturnType<typeof getHistoryCalendar>>;
+    expect(selectHistoryDay(beforeCorrection, '2026-11-03', firstGoal.id)?.evidence).toContainEqual(
+      expect.objectContaining({ id: evidence.id, observedAt: '2026-11-04T01:00:00.000Z' }),
+    );
+
+    const patched = await patchEvidence(new Request('http://localhost/api/evidence', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: evidence.id, text: '导师补充确认表达清晰', source: '导师反馈', reference: 'audio-review-v2', observedAt: '2026-11-06T01:00:00.000Z',
+        links: ['task'], goalPlanId: secondGoal.id, goalActionId: secondAction.id,
+        level: 'E3', reportSubmitted: null, benchmarkComplete: null, latencyMs: null,
+      }),
+    }));
+    expect(patched.status).toBe(200);
+
+    const historyResponse = await getHistoryCalendarRoute(new Request('http://localhost/api/history-calendar?timeZone=America%2FLos_Angeles'));
+    const history = await historyResponse.json() as Awaited<ReturnType<typeof getHistoryCalendar>>;
+    expect(selectHistoryDay(history, '2026-11-03', firstGoal.id)).toBeUndefined();
+    expect(selectHistoryDay(history, '2026-11-05', secondGoal.id)?.evidence).toEqual([
+      expect.objectContaining({ id: evidence.id, goalActionId: secondAction.id, observedAt: '2026-11-06T01:00:00.000Z' }),
+    ]);
   });
 
   it('已确认周计划仍是安排记录，只有显式完成记录才进入历史', () => {

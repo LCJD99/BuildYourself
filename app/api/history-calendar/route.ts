@@ -1,4 +1,4 @@
-import { getHistoryCalendar } from '@/lib/history-calendar';
+import { getHistoryCalendar } from '../../../lib/history-calendar';
 
 export const dynamic = 'force-dynamic';
 

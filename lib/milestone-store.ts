@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { evaluate, nodes, type Evidence, type EvidenceNodeId, type Result } from './model';
 import { evaluateMilestone, type MilestoneConfirmation } from './milestone-review';
-import { openDatabase, readEvidence, validateEvidenceInput, type EvidenceInput } from './store';
+import { openDatabase, readEvidence, validateEvidenceAssociation, validateEvidenceInput, type EvidenceInput } from './store';
 
 export type ResultChange = {
   nodeId: EvidenceNodeId;
@@ -184,6 +184,8 @@ function snapshot(evidence: Evidence) {
     observedAt: evidence.observedAt,
     createdAt: evidence.createdAt,
     links: nodes.filter(node => evidence.links.includes(node.id)).map(node => node.id),
+    goalPlanId: evidence.goalPlanId ?? null,
+    goalActionId: evidence.goalActionId ?? null,
     level: evidence.level,
     reportSubmitted: evidence.reportSubmitted,
     latencyMs: evidence.latencyMs,
@@ -197,6 +199,8 @@ function sameEvidence(current: Evidence, next: EvidenceInput) {
     && current.source === next.source
     && current.reference === next.reference
     && current.observedAt === next.observedAt
+    && (current.goalPlanId ?? null) === (next.goalPlanId ?? null)
+    && (current.goalActionId ?? null) === (next.goalActionId ?? null)
     && sameLinks
     && current.level === next.level
     && current.reportSubmitted === next.reportSubmitted
@@ -215,6 +219,7 @@ export function correctEvidence(id: unknown, input: unknown): EvidenceCorrection
     const beforeEvidence = readEvidence(database);
     const current = beforeEvidence.find(item => item.id === id);
     if (!current) throw new Error('证据不存在或已被删除');
+    validateEvidenceAssociation(database, nextInput.goalPlanId ?? null, nextInput.goalActionId ?? null);
     if (sameEvidence(current, nextInput)) {
       database.exec('COMMIT');
       inTransaction = false;
@@ -225,8 +230,8 @@ export function correctEvidence(id: unknown, input: unknown): EvidenceCorrection
     const beforeOutcomes = outcomes(beforeEvidence, confirmationBefore);
     const changedAt = new Date().toISOString();
     const beforeSnapshot = snapshot(current);
-    database.prepare(`UPDATE evidence SET text=?, source=?, reference=?, observed_at=?, report_submitted=?, latency_ms=?, benchmark_complete=?, level=? WHERE id=?`)
-      .run(nextInput.text, nextInput.source, nextInput.reference, nextInput.observedAt, nextInput.reportSubmitted === null ? null : Number(nextInput.reportSubmitted), nextInput.latencyMs, nextInput.benchmarkComplete === null ? null : Number(nextInput.benchmarkComplete), nextInput.level, id);
+    database.prepare(`UPDATE evidence SET text=?, source=?, reference=?, observed_at=?, report_submitted=?, latency_ms=?, benchmark_complete=?, level=?, goal_plan_id=?, goal_action_id=? WHERE id=?`)
+      .run(nextInput.text, nextInput.source, nextInput.reference, nextInput.observedAt, nextInput.reportSubmitted === null ? null : Number(nextInput.reportSubmitted), nextInput.latencyMs, nextInput.benchmarkComplete === null ? null : Number(nextInput.benchmarkComplete), nextInput.level, nextInput.goalPlanId ?? null, nextInput.goalActionId ?? null, id);
     database.prepare('DELETE FROM evidence_links WHERE evidence_id=?').run(id);
     const insertLink = database.prepare('INSERT INTO evidence_links(evidence_id,node_id) VALUES (?,?)');
     for (const link of nextInput.links) insertLink.run(id, link);

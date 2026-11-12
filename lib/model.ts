@@ -22,6 +22,8 @@ export type EvidenceSnapshot = {
   observedAt: string;
   createdAt: string;
   links: NodeId[];
+  goalPlanId?: string | null;
+  goalActionId?: string | null;
   level: EvidenceLevel;
   reportSubmitted: boolean | null;
   latencyMs: number | null;

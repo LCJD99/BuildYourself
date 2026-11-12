@@ -39,6 +39,13 @@ function formatDateTime(value: string) {
   return new Date(value).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+function dateTimeInput(value: string) {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return '';
+  parsed.setMinutes(parsed.getMinutes() - parsed.getTimezoneOffset());
+  return parsed.toISOString().slice(0, 16);
+}
+
 function formatTaskChangeValue(value: unknown, actions: GoalPlanAction[]) {
   if (value === null || value === undefined || value === '') return '未设置';
   if (Array.isArray(value)) {
@@ -166,6 +173,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
       requirementId: requirement.id,
       description: '',
       level: requirement.minimumLevel ?? 'E1',
+      observedAt: new Date().toISOString(),
     })));
   }
 
@@ -211,6 +219,9 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
               <select value={completionEvidence[index]?.level ?? 'E1'} onChange={event => updateCompletionEvidence(index, { level: event.target.value as CompletionEvidence['level'] })}>
                 <option value="E1">E1 · 用户自报</option><option value="E2">E2 · 可验证产出</option><option value="E3">E3 · 外部专业反馈</option>
               </select>
+            </label>
+            <label>证据实际发生时间
+              <input required type="datetime-local" value={dateTimeInput(completionEvidence[index]?.observedAt ?? '')} onChange={event => updateCompletionEvidence(index, { observedAt: event.target.value ? new Date(event.target.value).toISOString() : '' })} />
             </label>
           </fieldset>
         ))}
