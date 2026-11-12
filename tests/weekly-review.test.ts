@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activateGoalPlan, listGoalPlanActions, markGoalPlanActionDone, saveGoalPlanDraft } from '../lib/goal-plans';
+import { activateGoalPlan, listGoalPlanActions, markGoalPlanActionDone, saveGoalPlanDraft, updateGoalPlanAction } from '../lib/goal-plans';
 import { confirmDailyPlan, generateAndSaveDailyPlan } from '../lib/daily-plan-store';
 import { saveEvidence } from '../lib/store';
 import { getWeeklyReview, saveWeeklyReview } from '../lib/weekly-review-store';
@@ -132,9 +132,26 @@ describe('目标周复盘', () => {
     const { review } = getWeeklyReview(weekStart, 'UTC');
     const milestone = review.goals.find(goal => goal.goalPlanId === goalPlanId)!.milestones[0];
     expect(milestone.requiredEvidenceLevel).toBe('E3');
+    expect(milestone.evidenceRequirementSource).toContain('关联不确定');
     expect(milestone.qualifiedEvidenceCount).toBe(0);
     expect(milestone.status).not.toContain('未达标');
     expect(review.adjustment.kind).toBe('measure');
+    expect(review.adjustment.expectedResult).toContain('E3');
+  });
+
+  it('独立行动允许 E1 或 E2 时，不能降低里程碑单独要求的 E3 门槛', () => {
+    const weekStart = currentWeekStart();
+    const goalPlanId = createGoalPlan('E3');
+    const action = listGoalPlanActions(goalPlanId)[0];
+    updateGoalPlanAction(action.id, { evidenceRequirement: '行动结果允许 E1 或 E2' });
+    saveBenchmark(goalPlanId, action.id, 190, 'E2');
+
+    const { review } = getWeeklyReview(weekStart, 'UTC');
+    const milestone = review.goals.find(goal => goal.goalPlanId === goalPlanId)!.milestones[0];
+    expect(milestone.requiredEvidenceLevel).toBe('E3');
+    expect(milestone.evidenceRequirementSource).toContain('关联不确定');
+    expect(milestone.qualifiedEvidenceCount).toBe(0);
+    expect(milestone.status).not.toContain('达到标准');
     expect(review.adjustment.expectedResult).toContain('E3');
   });
 

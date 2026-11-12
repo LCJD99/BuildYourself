@@ -146,48 +146,71 @@ function latestCompleteMeasurement(evidence: Evidence[], minimumLevel: EvidenceL
 
 const evidenceLevelRank: Record<EvidenceLevel, number> = { E1: 1, E2: 2, E3: 3 };
 
-function evidenceRequirementFor(goal: GoalPlan, milestone: GoalMilestone, actions: GoalActionRelation[]) {
-  const requirementText = [milestone.evidenceRequirement, ...actions.map(action => action.evidenceRequirement)]
-    .filter((value): value is string => Boolean(value));
-  const explicitRequirements = [
-    milestone.evidenceRequirement ?? '',
-    milestone.successCriteria ?? '',
-    ...actions.map(action => action.evidenceRequirement ?? ''),
-  ];
-  const explicitLevels = explicitRequirements.flatMap(value => value.match(/E[123]/g) ?? []) as EvidenceLevel[];
-  if (explicitLevels.length) {
-    const alternatives = explicitRequirements.some(value => /(?:E[123]\s*(?:或|\/|or)\s*E[123])|(?:E[123].{0,5}(?:或|\/|or).{0,5}E[123])/i.test(value));
-    const requested = alternatives
-      ? explicitLevels.reduce((lower, level) => evidenceLevelRank[level] < evidenceLevelRank[lower] ? level : lower)
-      : explicitLevels.reduce((higher, level) => evidenceLevelRank[level] > evidenceLevelRank[higher] ? level : higher);
-    const level = evidenceLevelRank[requested] < evidenceLevelRank.E2 ? 'E2' : requested;
-    return { level, source: `里程碑/行动要求 ${requested}${level === 'E2' && requested === 'E1' ? '；关键里程碑高置信度最低按 E2 核对' : ''}` };
-  }
+function parseEvidenceRequirementLevel(value: string): { level: EvidenceLevel; alternatives: string[] } | null {
+  const groups = [...value.matchAll(/E[123](?:(?:\s*(?:或|\/|or)\s*)E[123])*/gi)]
+    .map(match => [...match[0].matchAll(/E[123]/gi)].map(level => level[0].toUpperCase() as EvidenceLevel));
+  if (!groups.length) return null;
+  const levels = groups.map(group => group.reduce((lowest, current) =>
+    evidenceLevelRank[current] < evidenceLevelRank[lowest] ? current : lowest));
+  const level = levels.reduce((highest, current) =>
+    evidenceLevelRank[current] > evidenceLevelRank[highest] ? current : highest);
+  return { level, alternatives: groups.map(group => [...new Set(group)].join('/')) };
+}
 
-  const normalizedText = requirementText.map(value => value.toLocaleLowerCase().replace(/[\s，,。:：;；()（）]/g, '')).filter(value => value.length >= 3);
-  const matchingRequirements = goal.evidenceRequirements.filter(requirement => {
-    if (!requirement.minimumLevel) return false;
-    const fields = [requirement.item, requirement.description]
-      .filter((value): value is string => Boolean(value))
-      .map(value => value.toLocaleLowerCase().replace(/[\s，,。:：;；()（）]/g, ''));
-    return fields.some(field => normalizedText.some(text => text === field || (Math.min(text.length, field.length) >= 3 && (text.includes(field) || field.includes(text)))));
+function normalizeRequirementText(value: string) {
+  return value.toLocaleLowerCase()
+    .replace(/e[123](?:(?:\s*(?:或|\/|or)\s*)e[123])*/gi, '')
+    .replace(/[\s，,。:：;；()（）]/g, '');
+}
+
+function evidenceRequirementFor(goal: GoalPlan, milestone: GoalMilestone, actions: GoalActionRelation[]) {
+  const localRequirements = [
+    { label: '里程碑证据要求', text: milestone.evidenceRequirement },
+    ...actions.map(action => ({ label: `行动「${action.title}」证据要求`, text: action.evidenceRequirement })),
+  ].filter((requirement): requirement is { label: string; text: string } => Boolean(requirement.text));
+  const localConstraints = localRequirements.flatMap(requirement => {
+    const parsed = parseEvidenceRequirementLevel(requirement.text);
+    if (!parsed) return [];
+    return [{
+      level: parsed.level,
+      source: `${requirement.label}：${parsed.alternatives.join('、')} 中最低为 ${parsed.level}`,
+    }];
   });
-  const planRequirements = matchingRequirements.length
-    ? matchingRequirements
-    : goal.evidenceRequirements.filter(requirement => requirement.minimumLevel !== null);
-  const requested = planRequirements.reduce<EvidenceLevel | null>((highest, requirement) => {
+
+  const planRequirements = goal.evidenceRequirements.filter(requirement => requirement.minimumLevel !== null);
+  const requirementMatches = localRequirements.map(requirement => {
+    const normalizedText = normalizeRequirementText(requirement.text);
+    return planRequirements.filter(planRequirement => [planRequirement.item, planRequirement.description]
+      .some(value => value && normalizeRequirementText(value) === normalizedText));
+  });
+  const reliablyMatched = localRequirements.length > 0
+    && requirementMatches.every(matches => matches.length === 1);
+  const matchedPlanRequirements = reliablyMatched
+    ? [...new Map(requirementMatches.flat().map(requirement => [requirement.id, requirement])).values()]
+    : [];
+  const resolvedPlanRequirements = reliablyMatched ? matchedPlanRequirements : planRequirements;
+  const planLevel = resolvedPlanRequirements.reduce<EvidenceLevel | null>((highest, requirement) => {
     const current = requirement.minimumLevel;
     if (!current) return highest;
     if (!highest || evidenceLevelRank[current] > evidenceLevelRank[highest]) return current;
     return highest;
-  }, null) ?? 'E2';
+  }, null);
+
+  const requested = [...localConstraints.map(constraint => constraint.level), ...(planLevel ? [planLevel] : [])]
+    .reduce<EvidenceLevel | null>((highest, current) => {
+      if (!highest || evidenceLevelRank[current] > evidenceLevelRank[highest]) return current;
+      return highest;
+    }, null) ?? 'E2';
   const level = evidenceLevelRank[requested] < evidenceLevelRank.E2 ? 'E2' : requested;
-  const source = matchingRequirements.length
-    ? `目标证据要求 ${matchingRequirements.map(requirement => requirement.item ?? requirement.description).filter(Boolean).join('、') || requested}`
-    : planRequirements.length
-      ? `未能对应到单项标准，按目标计划最高要求 ${requested} 核对`
-      : '计划未设置证据等级；关键里程碑高置信度最低按 E2 核对';
-  return { level, source };
+  const sourceParts = [
+    ...localConstraints.map(constraint => constraint.source),
+    ...(planLevel ? [reliablyMatched
+      ? `精确关联目标证据要求：${matchedPlanRequirements.map(requirement => requirement.item ?? requirement.description).filter(Boolean).join('、')}（最高 ${planLevel}）`
+      : `无法可靠关联目标计划中的具体证据要求，保守按全部目标证据要求最高等级 ${planLevel} 核对（关联不确定）`] : []),
+    ...(requested === 'E1' ? ['关键里程碑高置信度最低按 E2 核对'] : []),
+    ...(!planLevel && !localConstraints.length ? ['计划未设置可解析的证据等级，关键里程碑默认按 E2 核对'] : []),
+  ];
+  return { level, source: sourceParts.join('；') };
 }
 
 function listGoalActionRelations(goalPlanIds: string[]): GoalActionRelation[] {
