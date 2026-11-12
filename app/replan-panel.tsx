@@ -13,6 +13,8 @@ const triggerLabels: Record<ReplanTrigger, string> = {
   constraint_change: '其他约束变化', infeasible: '安排不可执行', execution_deviation: '重大执行偏差',
 };
 const triggerOptions = Object.keys(triggerLabels) as ReplanTrigger[];
+const relationTypeLabels = { prerequisite: '前置依赖', time_conflict: '时间冲突', recovery_conflict: '恢复冲突', shared_activity: '共享活动', shared_material: '共享材料' };
+const relationStatusLabels = { candidate: '待验证', confirmed: '已确认', verified: '已验证', rejected: '已否定' };
 
 function localDateString(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -220,6 +222,16 @@ export default function ReplanPanel({ goals, onAccepted }: { goals: Array<{ id: 
           {selected.plan.recoveryConstraints && selected.plan.recoveryConstraints.length > 0 && <div className="replan-recovery-summary">
             <strong>本次保护的恢复约束</strong>
             <ul>{selected.plan.recoveryConstraints.map(item => <li key={`${item.goalPlanId}-${item.date}`}>{item.goalTitle} · {dateLabel(item.date)} · {item.reason}</li>)}</ul>
+          </div>}
+          {selected.plan.relationExplanations && selected.plan.relationExplanations.length > 0 && <div className="replan-relation-explanations">
+            <strong>跨目标关系如何影响这份建议</strong>
+            <ul>{selected.plan.relationExplanations.map(item => <li key={item.relation.id}>
+              <strong>{item.relation.sourceAction.goalTitle} · {item.relation.sourceAction.actionTitle} → {item.relation.targetAction.goalTitle} · {item.relation.targetAction.actionTitle}</strong>
+              <span>关系 {item.relation.id} · v{item.relation.version} · {relationTypeLabels[item.relation.type]} · {relationStatusLabels[item.relation.status]} · 可信度 {item.relation.confidence} · {item.relation.sourceType}：{item.relation.sourceLabel}{item.relation.sourceReference ? ` · ${item.relation.sourceReference}` : ''}</span>
+              <span>{item.effect === 'unconfirmed' ? '候选关系未参与排程。' : item.effect === 'context' ? '已确认关系作为背景说明，不改变日期。' : item.explanation}</span>
+              <span>影响：{item.relation.impact}</span>
+              <small>证据引用：{item.relation.evidenceReferences.map(reference => `${reference.label} [${reference.kind}:${reference.id}]`).join('；')}</small>
+            </li>)}</ul>
           </div>}
           {selected.deadlineGaps.length > 0 && <div className="replan-deadline-gaps" role="alert">
             <strong>部分安排仍有硬截止风险</strong>

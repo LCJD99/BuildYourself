@@ -1,4 +1,22 @@
+import type { GoalRelationSnapshot } from './goal-relations';
+
 export type ActionPriority = 'high' | 'medium' | 'low';
+
+export type PlannerRelationRule = {
+  relationId: string;
+  relationVersion: number;
+  type: 'prerequisite' | 'time_conflict' | 'recovery_conflict';
+  otherActionId: string;
+  otherActionTitle: string;
+  otherGoalTitle: string;
+  minimumRestDays: number | null;
+};
+
+export type PlannerRelationExplanation = {
+  relation: GoalRelationSnapshot;
+  effect: 'schedule' | 'context' | 'unconfirmed';
+  explanation: string;
+};
 
 export type PlannerAction = {
   id: string;
@@ -13,6 +31,7 @@ export type PlannerAction = {
   milestoneTitle: string | null;
   milestoneCriteria: string | null;
   dependsOn: string[];
+  relationRules?: PlannerRelationRule[];
   createdAt: string;
 };
 
@@ -37,6 +56,7 @@ export type WeeklyPlan = {
   days: WeeklyPlanDay[];
   unplaced: Array<{ action: PlannerAction; reason: string }>;
   recoveryConstraints?: RecoveryConstraint[];
+  relationExplanations?: PlannerRelationExplanation[];
 };
 
 const DEFAULT_CAPACITY_MINUTES = 240;
@@ -152,11 +172,19 @@ export function generateWeeklyPlan(input: {
     const action = ready[0];
     const dependencyDates = action.dependsOn.map(id => scheduledDate.get(id)!);
     const earliestDate = dependencyDates.length ? addDays(dependencyDates.sort().at(-1)!, 1) : input.weekStart;
+    const recoveryEarliestDates = (action.relationRules ?? [])
+      .filter(rule => rule.type === 'recovery_conflict' && rule.minimumRestDays !== null)
+      .flatMap(rule => {
+        const sourceDate = scheduledDate.get(rule.otherActionId);
+        return sourceDate ? [addDays(sourceDate, rule.minimumRestDays! + 1)] : [];
+      });
+    const earliestAllowedDate = [earliestDate, ...recoveryEarliestDates].sort().at(-1)!;
     const duration = action.estimateMinutes ?? DEFAULT_ESTIMATE_MINUTES;
-    const recoveryBlocks = recoveryConstraints.filter(item => item.goalPlanId === action.goalPlanId && item.date >= earliestDate && (!action.hardDeadline || item.date <= action.hardDeadline));
-    const eligible = (day: WeeklyPlanDay) => day.date >= earliestDate
+    const recoveryBlocks = recoveryConstraints.filter(item => item.goalPlanId === action.goalPlanId && item.date >= earliestAllowedDate && (!action.hardDeadline || item.date <= action.hardDeadline));
+    const eligible = (day: WeeklyPlanDay) => day.date >= earliestAllowedDate
       && (!action.hardDeadline || day.date <= action.hardDeadline)
       && !recoveryConstraints.some(item => item.goalPlanId === action.goalPlanId && item.date === day.date)
+      && !(action.relationRules ?? []).some(rule => rule.type === 'time_conflict' && scheduledDate.get(rule.otherActionId) === day.date)
       && day.capacityMinutes - day.usedMinutes >= duration;
     const preferredDate = input.preferredDates?.[action.id];
     const candidate = (preferredDate ? days.find(day => day.date === preferredDate && eligible(day)) : undefined)

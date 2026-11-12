@@ -4,6 +4,7 @@ import { listExternalCommitments } from './commitments';
 import { listGoalPlanActions, listGoalPlans, listPendingGoalActions, type GoalPlanAction } from './goal-plans';
 import { generateWeeklyPlan, type PlannerAction, type RecoveryConstraint, type WeeklyPlan } from './daily-planner';
 import { getDailyPlan } from './daily-plan-store';
+import { ensureGoalRelationsSchema, listGoalRelations } from './goal-relations';
 
 export type ReplanTrigger = 'new_commitment' | 'deadline_change' | 'scope_change' | 'capacity_change' | 'constraint_change' | 'infeasible' | 'execution_deviation';
 export type ReplanChange = { actionId: string; title: string; fromDate: string | null; toDate: string | null; reason: string };
@@ -71,16 +72,39 @@ function ensureSchema() {
 }
 
 function sourceState(database: ReturnType<typeof openDatabase>) {
+  ensureGoalRelationsSchema(database);
   const goalPlans = database.prepare('SELECT id, status, plan_json FROM goal_plans ORDER BY id').all();
   const actions = database.prepare('SELECT * FROM goal_plan_actions ORDER BY id').all();
   const commitments = database.prepare(`SELECT id,status,source_text,deliverable,deadline,goal_plan_id,tasks_json,uncertain_fields_json,created_at
     FROM external_commitments ORDER BY id`).all();
-  return JSON.stringify({ goalPlans, actions, commitments });
+  const relations = database.prepare('SELECT id,version,type,source_action_json,target_action_json,status,updated_at FROM goal_relations ORDER BY id').all();
+  return JSON.stringify({ goalPlans, actions, commitments, relations });
+}
+
+function relationStateMatchesSnapshot(relations: ReturnType<typeof listGoalRelations>, snapshot: string) {
+  const rows = (JSON.parse(snapshot) as { relations: Array<Record<string, unknown>> }).relations;
+  const fromSnapshot = rows.map(row => ({
+    id: String(row.id), version: Number(row.version), type: String(row.type),
+    sourceAction: JSON.parse(String(row.source_action_json)), targetAction: JSON.parse(String(row.target_action_json)),
+    status: String(row.status), updatedAt: String(row.updated_at),
+  })).sort((a, b) => a.id.localeCompare(b.id));
+  const fromRelations = relations.map(relation => ({
+    id: relation.id, version: relation.version, type: relation.type,
+    sourceAction: relation.sourceAction, targetAction: relation.targetAction,
+    status: relation.status, updatedAt: relation.updatedAt,
+  })).sort((a, b) => a.id.localeCompare(b.id));
+  return JSON.stringify(fromSnapshot) === JSON.stringify(fromRelations);
 }
 
 function nextDate(value: string) {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function dateAfter(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
 
@@ -222,7 +246,7 @@ function findChanges(previousPlan: WeeklyPlan, plan: WeeklyPlan, trigger: Replan
       || JSON.stringify(old.action.dependsOn) !== JSON.stringify(entry.action.dependsOn)
     ));
     if (old?.date === toDate && !actionChanged) continue;
-    const reason = !old
+    const baseReason = !old
       ? `新增承诺「${entry.action.title}」，需在容量与截止范围内安排。`
       : actionChanged && old.date === toDate
         ? '行动范围、时长、截止或依赖已变化；原日期仍满足约束，予以保留。'
@@ -231,6 +255,10 @@ function findChanges(previousPlan: WeeklyPlan, plan: WeeklyPlan, trigger: Replan
         : old.date === null
           ? `此前尚未排入；本次按「${triggerLabels[trigger]}」重新计算后安排。`
           : `受「${triggerLabels[trigger]}」影响，原日期容量或依赖不再适用，已移动到该日期。`;
+    const relationReasons = plan.relationExplanations?.filter(item => item.effect === 'schedule'
+      && (item.relation.sourceAction.actionId === id || item.relation.targetAction.actionId === id))
+      .map(item => `遵循已确认关系 ${item.relation.id}（版本 ${item.relation.version}）：${item.relation.impact}`) ?? [];
+    const reason = [baseReason, ...relationReasons].join(' ');
     changes.push({ actionId: id, title: entry.action.title, fromDate: old?.date ?? null, toDate, reason });
   }
   for (const [id, entry] of before) if (!after.has(id)) {
@@ -258,9 +286,13 @@ export function createReplanProposal(input: { weekStart: unknown; trigger: unkno
   listPendingGoalActions();
   listExternalCommitments();
   const current = getDailyPlan(input.weekStart);
+  const relationsAtStart = listGoalRelations();
   const sourceDatabase = openDatabase();
   let sourceSnapshotAtStart: string;
   try { sourceSnapshotAtStart = sourceState(sourceDatabase); } finally { sourceDatabase.close(); }
+  if (!relationStateMatchesSnapshot(relationsAtStart, sourceSnapshotAtStart)) {
+    throw new Error('跨目标关系在生成期间发生变化，请重新生成建议。');
+  }
   const currentCapacity = Object.fromEntries((current.plan?.days ?? []).map(day => [day.date, day.capacityMinutes]));
   const mergedCapacities = { ...currentCapacity, ...(capacities as Record<string, number>) };
   const pendingGoalActions = listPendingGoalActions();
@@ -298,9 +330,57 @@ export function createReplanProposal(input: { weekStart: unknown; trigger: unkno
   const commitments = commitmentActions(new Set(actionsById.keys()));
   for (const action of commitments) actionsById.set(action.id, action);
 
+  const relationExplanations = relationsAtStart.filter(relation => relation.status !== 'rejected'
+    && actionsById.has(relation.sourceAction.actionId) && actionsById.has(relation.targetAction.actionId))
+    .map(relation => ({
+      relation: {
+        id: relation.id, version: relation.version, type: relation.type,
+        sourceAction: relation.sourceAction, targetAction: relation.targetAction,
+        sourceType: relation.sourceType, sourceLabel: relation.sourceLabel, sourceReference: relation.sourceReference,
+        confidence: relation.confidence, evidenceReferences: relation.evidenceReferences,
+        impact: relation.impact, minimumRestDays: relation.minimumRestDays,
+        status: relation.status, createdAt: relation.createdAt, updatedAt: relation.updatedAt,
+      },
+      effect: relation.status === 'candidate'
+        ? 'unconfirmed' as const
+        : ['prerequisite', 'time_conflict', 'recovery_conflict'].includes(relation.type) ? 'schedule' as const : 'context' as const,
+      explanation: relation.status === 'candidate' ? '待核对关系未参与排程。'
+        : ['prerequisite', 'time_conflict', 'recovery_conflict'].includes(relation.type) ? '已确认约束已纳入本次推荐。'
+          : '已确认关系作为背景展示，不直接改变行动日期。',
+    }));
+  for (const relation of relationsAtStart.filter(item => item.status === 'confirmed' || item.status === 'verified')) {
+    const sourceAction = actionsById.get(relation.sourceAction.actionId);
+    const targetAction = actionsById.get(relation.targetAction.actionId);
+    if (!sourceAction || !targetAction) continue;
+    if (relation.type === 'prerequisite') {
+      targetAction.dependsOn = [...new Set([...targetAction.dependsOn, sourceAction.id])];
+      targetAction.relationRules = [...(targetAction.relationRules ?? []), {
+        relationId: relation.id, relationVersion: relation.version, type: relation.type,
+        otherActionId: sourceAction.id, otherActionTitle: sourceAction.title, otherGoalTitle: sourceAction.goalTitle, minimumRestDays: null,
+      }];
+    } else if (relation.type === 'time_conflict') {
+      sourceAction.relationRules = [...(sourceAction.relationRules ?? []), {
+        relationId: relation.id, relationVersion: relation.version, type: relation.type,
+        otherActionId: targetAction.id, otherActionTitle: targetAction.title, otherGoalTitle: targetAction.goalTitle, minimumRestDays: null,
+      }];
+      targetAction.relationRules = [...(targetAction.relationRules ?? []), {
+        relationId: relation.id, relationVersion: relation.version, type: relation.type,
+        otherActionId: sourceAction.id, otherActionTitle: sourceAction.title, otherGoalTitle: sourceAction.goalTitle, minimumRestDays: null,
+      }];
+    } else if (relation.type === 'recovery_conflict') {
+      targetAction.dependsOn = [...new Set([...targetAction.dependsOn, sourceAction.id])];
+      targetAction.relationRules = [...(targetAction.relationRules ?? []), {
+        relationId: relation.id, relationVersion: relation.version, type: relation.type,
+        otherActionId: sourceAction.id, otherActionTitle: sourceAction.title, otherGoalTitle: sourceAction.goalTitle,
+        minimumRestDays: relation.minimumRestDays,
+      }];
+    }
+  }
+
   const preferredDates: Record<string, string> = Object.fromEntries(beforeEntries.filter(entry => entry.date).map(entry => [entry.action.id, entry.date!]));
   for (const action of commitments) if (action.hardDeadline) preferredDates[action.id] = action.hardDeadline;
   const plan = generateWeeklyPlan({ weekStart: input.weekStart, actions: [...actionsById.values()], capacities: mergedCapacities, preferredDates, recoveryConstraints });
+  plan.relationExplanations = relationExplanations;
   const changes = findChanges(previousPlan, plan, trigger);
   const now = new Date().toISOString();
   const database = ensureSchema();
@@ -358,6 +438,16 @@ export function editReplanProposal(id: string, placements: unknown): ReplanPropo
     for (const dependency of action.dependsOn) {
       const dependencyDate = datesById.get(dependency);
       if (!dependencyDate || dependencyDate >= day.date) throw new Error(`「${action.title}」必须在依赖行动完成后的日期安排。`);
+    }
+    for (const rule of action.relationRules ?? []) {
+      const relatedDate = datesById.get(rule.otherActionId);
+      if (rule.type === 'time_conflict' && relatedDate === day.date) {
+        throw new Error(`「${action.title}」与${rule.otherGoalTitle}的「${rule.otherActionTitle}」存在已确认的同日冲突（关系 ${rule.relationId}）。`);
+      }
+      if (rule.type === 'recovery_conflict' && relatedDate && rule.minimumRestDays !== null
+        && day.date < dateAfter(relatedDate, rule.minimumRestDays + 1)) {
+        throw new Error(`「${action.title}」未满足关系 ${rule.relationId} 要求的完整恢复间隔。`);
+      }
     }
   }
   const plan = { ...proposal.plan, days, unplaced };

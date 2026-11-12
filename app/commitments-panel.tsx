@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { CommitmentField, ExternalCommitment } from '@/lib/commitments';
 import ReplanPanel from './replan-panel';
+import GoalRelationsPanel from './goal-relations-panel';
 import type { DailyPlanRecord } from '@/lib/daily-plan-store';
 
 type CommitmentState = { commitments: ExternalCommitment[]; goals: Array<{ id: string; title: string }> };
@@ -115,6 +116,7 @@ export default function CommitmentsPanel({ onPlanAccepted }: { onPlanAccepted: (
         </div>
       ))}
       <ReplanPanel goals={state.goals} onAccepted={onPlanAccepted} />
+      <GoalRelationsPanel />
     </section>
   );
 }

@@ -107,9 +107,16 @@ function describeTaskProposals(proposals, actions = []) {
   }).join('\n\n') || '暂无任务拆分提议。';
 }
 
+function describeRelation(relation) {
+  const statuses = { candidate: '待验证', confirmed: '已确认', verified: '已验证', rejected: '已否定' };
+  const types = { prerequisite: '前置依赖', time_conflict: '时间冲突', recovery_conflict: '恢复冲突', shared_activity: '共享活动', shared_material: '共享材料' };
+  const evidence = (relation.evidenceReferences || []).map(item => `- ${item.label} [${item.kind}:${item.id}]`).join('\n') || '无';
+  return `关系 ID：${relation.id} · v${relation.version} · ${statuses[relation.status]}\n${relation.sourceAction.goalTitle} · ${relation.sourceAction.actionTitle} → ${relation.targetAction.goalTitle} · ${relation.targetAction.actionTitle}\n类型：${types[relation.type]}${relation.minimumRestDays ? `（完整恢复 ${relation.minimumRestDays} 天）` : ''}\n影响：${relation.impact}\n来源：${relation.sourceType} · ${relation.sourceLabel}${relation.sourceReference ? ` · ${relation.sourceReference}` : ''}\n可信度：${relation.confidence}\n证据引用：\n${evidence}`;
+}
+
 export default function (pi) {
   pi.on('before_agent_start', event => ({
-    systemPrompt: `${event.systemPrompt}\n\nBuildYourself goal planning instructions:\n- When a user expresses a long-term goal or asks to turn an intention into a plan, use the goal_planning tool. The user may also start with /goal.\n- Start from the user's own words. Ask only for missing context, desired observable result, current baseline, or constraints when the answer would change the plan. Ask one concise question at a time; don't repeat information already given.\n- Use the learning, fitness, project, or general template. A domain without a dedicated template is still supported. If the baseline is unknown, propose one concrete, low-cost baseline action instead of pretending to know the user's level.\n- Draft a success description, observable result, review cycle, evidence requirements, constraints, milestones, and at least one concrete near-term action. Assess each near milestone's standard and evidence availability; explain the assessment. Future milestones may stay provisional with a reason to refine them later. Never invent evidence or claim a standard is validated without support.\n- Save a draft as soon as the user asks to save or when they want to stop before the contract is complete. An incomplete draft must stay a draft and must not create scheduled actions.\n- Present the saved draft and validation issues for review. Apply requested edits by updating that draft. Do not activate or schedule actions until the user explicitly confirms the complete draft. Activation opens a separate confirmation dialog. After activation, near-term actions enter the pending schedule pool; do not invent dates or time slots.\n- For a large active task, propose 2–20 concrete subtasks with individual estimates, explicit completion criteria, dependencies, and only supported deadlines through task_decomposition. A proposal stays outside the pending pool while awaiting review. Show it to the user and preserve its child task IDs when editing. Confirm or reject only after the user decides; confirmation requires the tool's separate interactive confirmation.`,
+    systemPrompt: `${event.systemPrompt}\n\nBuildYourself goal planning instructions:\n- When a user expresses a long-term goal or asks to turn an intention into a plan, use the goal_planning tool. The user may also start with /goal.\n- Start from the user's own words. Ask only for missing context, desired observable result, current baseline, or constraints when the answer would change the plan. Ask one concise question at a time; don't repeat information already given.\n- Use the learning, fitness, project, or general template. A domain without a dedicated template is still supported. If the baseline is unknown, propose one concrete, low-cost baseline action instead of pretending to know the user's level.\n- Draft a success description, observable result, review cycle, evidence requirements, constraints, milestones, and at least one concrete near-term action. Assess each near milestone's standard and evidence availability; explain the assessment. Future milestones may stay provisional with a reason to refine them later. Never invent evidence or claim a standard is validated without support.\n- Save a draft as soon as the user asks to save or when they want to stop before the contract is complete. An incomplete draft must stay a draft and must not create scheduled actions.\n- Present the saved draft and validation issues for review. Apply requested edits by updating that draft. Do not activate or schedule actions until the user explicitly confirms the complete draft. Activation opens a separate confirmation dialog. After activation, near-term actions enter the pending schedule pool; do not invent dates or time slots.\n- For a large active task, propose 2–20 concrete subtasks with individual estimates, explicit completion criteria, dependencies, and only supported deadlines through task_decomposition. A proposal stays outside the pending pool while awaiting review. Show it to the user and preserve its child task IDs when editing. Confirm or reject only after the user decides; confirmation requires the tool's separate interactive confirmation.\n- When you infer a cross-goal relationship, use goal_relations to save it as a candidate with source, evidence references, confidence, and impact. Never use a candidate as a fact or as a reason for a major replan before the user confirms it. Use only known action IDs and actual evidence references. Present the candidate for review; confirming requires a separate interactive confirmation. Corrections remain candidates until confirmed.`,
   }));
 
   pi.registerCommand('goal', {
@@ -324,6 +331,75 @@ export default function (pi) {
         return result(describeTaskProposals([data.proposal], overview.actions || []));
       } catch (error) {
         return result(error instanceof Error ? error.message : '任务拆分操作失败。', true);
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: 'goal_relations',
+    label: 'Cross-goal Relations',
+    description: 'Propose, inspect, correct, confirm, or reject versioned cross-goal action relationships with evidence references.',
+    promptSnippet: 'Keep inferred cross-goal relationships as candidates until the user explicitly confirms them.',
+    promptGuidelines: [
+      'Use only existing action IDs from active goals. Relationship candidates must have a source label, impact, confidence, and evidence citations; action endpoints are cited automatically.',
+      'Use ai_inference for your own hypotheses, keep confidence proportional to evidence, and state what the relation would change. Do not invent shared materials, conflicts, or dependencies.',
+      'Proposing or correcting a relationship saves it as a candidate. Candidate relationships never constrain replanning. Correcting a relation returns it to candidate status and requires a new confirmation.',
+      'Confirm only after the user explicitly decides. Use the interactive confirmation dialog and explain that scheduling relations apply to future replan proposals, not the already accepted plan.',
+      'Reject only when the user asks or agrees to reject, and record their reason. Keep relation IDs when correcting or resolving records.',
+    ],
+    parameters: Type.Object({
+      action: oneOf(['list', 'propose', 'correct', 'confirm', 'reject']),
+      relationId: Type.Optional(Type.String()),
+      relationType: Type.Optional(oneOf(['prerequisite', 'time_conflict', 'recovery_conflict', 'shared_activity', 'shared_material'])),
+      sourceActionId: Type.Optional(Type.String()),
+      targetActionId: Type.Optional(Type.String()),
+      sourceType: Type.Optional(oneOf(['user', 'rule', 'professional', 'ai_inference'])),
+      sourceLabel: optionalText(),
+      sourceReference: optionalText(),
+      confidence: Type.Optional(oneOf(['low', 'medium', 'high'])),
+      impact: optionalText(),
+      minimumRestDays: Type.Optional(Type.Integer({ minimum: 1, maximum: 7 })),
+      evidenceReferences: Type.Optional(Type.Array(Type.Object({ kind: oneOf(['action', 'evidence', 'project', 'reference']), id: Type.String(), label: Type.String() }), { maxItems: 20 })),
+      reason: optionalText(),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      try {
+        const data = await api('/api/goal-relations');
+        if (params.action === 'list') return result(data.relations.map(describeRelation).join('\n\n') || '暂无跨目标关系。');
+        const relation = params.relationId ? data.relations.find(item => item.id === params.relationId) : null;
+        if (params.relationId && !relation) return result('找不到该关系，请先列出关系记录。', true);
+        const relationInput = {
+          type: params.relationType ?? relation?.type,
+          sourceActionId: params.sourceActionId ?? relation?.sourceAction.actionId,
+          targetActionId: params.targetActionId ?? relation?.targetAction.actionId,
+          sourceType: params.sourceType ?? relation?.sourceType,
+          sourceLabel: params.sourceLabel ?? relation?.sourceLabel,
+          sourceReference: params.sourceReference ?? relation?.sourceReference,
+          confidence: params.confidence ?? relation?.confidence,
+          impact: params.impact ?? relation?.impact,
+          minimumRestDays: params.minimumRestDays ?? relation?.minimumRestDays,
+          evidenceReferences: params.evidenceReferences ?? relation?.evidenceReferences.filter(item => item.kind !== 'action'),
+        };
+        if (params.action === 'propose') {
+          const saved = await api('/api/goal-relations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', relation: relationInput }) });
+          return result(`已保存为待验证候选；未确认前不会驱动重排。\n${describeRelation(saved.relation)}`);
+        }
+        if (!relation) return result('处理关系需要提供 relationId。', true);
+        const reason = params.reason?.trim();
+        if (!reason) return result('处理关系需要提供确认依据、否定原因或修正原因。', true);
+        if (params.action === 'confirm') {
+          if (relation.status !== 'candidate') return result('只有待验证关系可以确认。', true);
+          if (!ctx.hasUI) return result('确认跨目标关系需要交互式确认。', true);
+          if (!await ctx.ui.confirm('确认跨目标关系', `${describeRelation(relation)}\n\n确认后会影响今后的重排建议，不会改动已接受计划。`)) return result('用户取消确认；关系仍处于待验证状态。');
+        }
+        const action = params.action === 'correct' ? 'correct' : params.action === 'confirm' ? 'confirm' : 'reject';
+        const saved = await api('/api/goal-relations', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, relationId: relation.id, version: relation.version, reason, confirmed: action === 'confirm', ...(action === 'correct' ? { relation: relationInput } : {}) }),
+        });
+        return result(`${action === 'correct' ? '关系已修正并回到待验证状态。' : action === 'confirm' ? '关系已确认；只影响今后新生成的重排建议。' : '关系已否定并保留记录。'}\n${describeRelation(saved.relation)}`);
+      } catch (error) {
+        return result(error instanceof Error ? error.message : '跨目标关系操作失败。', true);
       }
     },
   });
