@@ -506,6 +506,19 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
     </form>;
   }
 
+  async function markTaskDone(action: GoalPlanAction) {
+    setBusyId(action.id);
+    try {
+      const response = await fetch(`/api/tasks/${encodeURIComponent(action.id)}/completion`, { method: 'POST' });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || '无法记录行动完成时间');
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法记录行动完成时间');
+    } finally {
+      setBusyId(null);
+    }
+  }
   const active = state.plans.filter(plan => plan.status === 'active');
   const paused = state.plans.filter(plan => plan.status === 'paused');
   const ended = state.plans.filter(plan => ['completed', 'archived', 'abandoned'].includes(plan.status));
@@ -728,8 +741,12 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
                 <article className="goal-task-card" id={`goal-action-${action.id}`} key={action.id}>
                   <div className="goal-task-card-head">
                     <div><span className={`goal-task-status ${action.decomposedAt ? 'decomposed' : action.status}`}>{action.decomposedAt ? '已拆分' : action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
-                    <button type="button" className="edit-evidence-button" disabled={!!action.decomposedAt} onClick={() => beginTaskEdit(action)}>{action.decomposedAt ? '已拆分' : '编辑'}</button>
+                    <div className="goal-task-actions">
+                      {action.status !== 'done' && <button type="button" className="edit-evidence-button" disabled={busyId === action.id} onClick={() => void markTaskDone(action)}>{busyId === action.id ? '记录中…' : '记录完成'}</button>}
+                      <button type="button" className="edit-evidence-button" disabled={!!action.decomposedAt} onClick={() => beginTaskEdit(action)}>{action.decomposedAt ? '已拆分' : '编辑'}</button>
+                    </div>
                   </div>
+                  {action.status === 'done' && <p className="goal-task-completed-at">实际完成时间：{action.completedAt ? formatDateTime(action.completedAt) : '日期不详（旧记录未保存完成时间）'}</p>}
                   {action.details && <p className="goal-task-description">{action.details}</p>}
                   {action.parentActionId && <p className="goal-task-description">子任务 · 父任务：{actions.find(parent => parent.id === action.parentActionId)?.title || '已拆分任务'}</p>}
                   {action.decomposedAt && <p className="goal-task-description">已由确认的子任务替代，父任务本身不会进入日级计划。</p>}

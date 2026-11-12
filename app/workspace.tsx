@@ -20,6 +20,7 @@ import type { WeeklyPlan } from '@/lib/daily-planner';
 import CommitmentsPanel from './commitments-panel';
 import ProjectNavigation from './project-navigation';
 import type { GoalProject } from '@/lib/goal-plans';
+import HistoryCalendarPanel from './history-calendar-panel';
 
 type Graph = {
   evidence: Evidence[];
@@ -289,6 +290,7 @@ export default function Workspace() {
 
           <DailyPlanPanel onActionClick={focusDailyAction} onPlanChange={updateDailyPlan} refreshKey={dailyPlanRevision} />
           <CommitmentsPanel onPlanAccepted={record => { updateDailyPlan(record); setDailyPlanRevision(value => value + 1); }} />
+          <HistoryCalendarPanel />
           <GoalPlansPanel focusActionId={focusedAction?.actionId} />
 
           {selected === 'task' && (

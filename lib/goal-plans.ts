@@ -102,6 +102,7 @@ export type GoalPlanAction = {
   status: 'pending_schedule' | 'scheduled' | 'done';
   parentActionId: string | null;
   decomposedAt: string | null;
+  completedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -455,6 +456,7 @@ function ensureSchema() {
       details TEXT,
       estimate_minutes INTEGER,
       status TEXT NOT NULL CHECK (status IN ('pending_schedule', 'scheduled', 'done')),
+      completed_at TEXT,
       priority TEXT NOT NULL DEFAULT 'medium',
       milestone_id TEXT,
       parent_action_id TEXT,
@@ -528,6 +530,7 @@ function ensureSchema() {
   const existingColumns = new Set(actionColumns.map(column => column.name));
   if (!existingColumns.has('parent_action_id')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN parent_action_id TEXT');
   if (!existingColumns.has('decomposed_at')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN decomposed_at TEXT');
+  if (!existingColumns.has('completed_at')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN completed_at TEXT');
   if (!existingColumns.has('project_name')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN project_name TEXT');
   if (!existingColumns.has('project_id')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN project_id TEXT REFERENCES goal_projects(id)');
   if (!existingColumns.has('deadline')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN deadline TEXT');
@@ -691,6 +694,7 @@ function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
     status: row.status === 'scheduled' || row.status === 'done' ? row.status : 'pending_schedule',
     parentActionId: row.parent_action_id === null || row.parent_action_id === undefined ? null : String(row.parent_action_id),
     decomposedAt: row.decomposed_at === null || row.decomposed_at === undefined ? null : String(row.decomposed_at),
+    completedAt: row.completed_at === null || row.completed_at === undefined ? null : String(row.completed_at),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at ?? row.created_at),
   };
@@ -698,7 +702,7 @@ function actionFromRow(row: Record<string, unknown>): GoalPlanAction {
 
 const actionSelect = `SELECT a.id, a.goal_plan_id, a.project_id, a.title, a.details, a.project_name, a.deadline,
   a.estimate_minutes, a.dependency_ids, a.success_criteria, a.evidence_requirement, a.status,
-  a.priority, a.milestone_id, a.parent_action_id, a.decomposed_at, a.created_at, a.updated_at,
+  a.priority, a.milestone_id, a.parent_action_id, a.decomposed_at, a.completed_at, a.created_at, a.updated_at,
   p.plan_json, json_extract(p.plan_json, '$.title') AS goal_title
   FROM goal_plan_actions a JOIN goal_plans p ON p.id=a.goal_plan_id`;
 
@@ -1241,6 +1245,35 @@ export function updateGoalPlanAction(id: string, input: unknown): GoalPlanAction
           next.successCriteria, next.evidenceRequirement, updatedAt, id);
       recordTaskChange(database, 'task.updated', { id, goalPlanId, title: next.title, projectName }, fieldChanges.map(change => change.field), updatedAt, fieldChanges);
     }
+    database.exec('COMMIT');
+    inTransaction = false;
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+  return listGoalPlanActions(goalPlanId).find(action => action.id === id)!;
+}
+
+export function markGoalPlanActionDone(id: string): GoalPlanAction {
+  const database = ensureSchema();
+  let goalPlanId = '';
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const row = database.prepare(`${actionSelect} WHERE a.id=? AND p.status='active'`).get(id) as Record<string, unknown> | undefined;
+    if (!row) throw new Error('只能记录活跃目标中的行动');
+    if (row.status === 'done') {
+      database.exec('COMMIT');
+      inTransaction = false;
+      return actionFromRow(row);
+    }
+    goalPlanId = String(row.goal_plan_id);
+    const completedAt = new Date().toISOString();
+    database.prepare("UPDATE goal_plan_actions SET status='done', completed_at=?, updated_at=? WHERE id=?")
+      .run(completedAt, completedAt, id);
     database.exec('COMMIT');
     inTransaction = false;
   } catch (error) {
