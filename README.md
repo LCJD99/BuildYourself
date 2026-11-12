@@ -14,8 +14,14 @@ npm run dev
 打开 http://localhost:3000。另开终端，在项目目录运行：
 
 ```sh
-pi -e ./pi/goal.js -e ./pi/commitment.js -e ./pi/evidence.js
+pi -e ./pi/agent.js -e ./pi/goal.js -e ./pi/commitment.js -e ./pi/evidence.js
 ```
+
+### 从当前目标或行动继续讨论
+
+浏览器右下角的业务 Agent 会显示当前讨论对象。切换到目标组合、具体目标、行动或证据后，入口和对话会使用对应层级的个人执行图谱上下文；应用与 pi 通过同一组上下文接口读取该对象。也可以在同一 pi 会话中使用 `/discuss`。
+
+普通讨论只读取和解释已有记录。改变目标标准、登记外部承诺或进行关键取舍时，Agent 只指出需要确认的后果，并沿用已有的目标契约、承诺、重排或复盘确认流程；讨论本身不会直接修改权威状态。
 
 ### 从自然语言创建目标
 

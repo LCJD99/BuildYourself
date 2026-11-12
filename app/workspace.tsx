@@ -27,6 +27,8 @@ import { createGoalNavigationState, goalNavigationReducer, summarizeGoalPortfoli
 import type { GoalNavigationDetail, GoalNavigationState } from '@/lib/goal-navigation';
 import HistoryCalendarPanel from './history-calendar-panel';
 import type { GoalEvidenceTarget } from '@/lib/goal-plans';
+import AgentAssistant from './agent-assistant';
+import type { AgentContextSelection } from '@/lib/agent-context';
 
 type Graph = {
   evidence: Evidence[];
@@ -157,6 +159,7 @@ export default function Workspace() {
   const [goalPanelState, setGoalPanelState] = useState<GoalPlansPanelState | null>(null);
   const [goalDetail, setGoalDetail] = useState<GoalPlanPanelDetail | null>(null);
   const [legacyToolsOpen, setLegacyToolsOpen] = useState(false);
+  const [legacyContextNode, setLegacyContextNode] = useState<NodeId | null>(null);
 
   useEffect(() => {
     try {
@@ -227,6 +230,7 @@ export default function Workspace() {
     setSelectedProject(null);
     setFocusedAction(action);
     setSelectedGoalPlanId(action.goalPlanId);
+    setLegacyContextNode(null);
     void select('task');
   }, [select]);
 
@@ -334,6 +338,7 @@ export default function Workspace() {
 
   const selected = selection ?? graph?.context ?? 'task';
   const current = nodes.find(node => node.id === selected)!;
+  const legacyContext = legacyContextNode ? nodes.find(node => node.id === legacyContextNode) ?? null : null;
   const results = graph?.results ?? [];
   const visible = graph?.evidence.filter(evidence => selected === 'goal' || evidence.links.includes(selected)) ?? [];
   const assessment = selected === 'task' || selected === 'milestone' ? graph?.assessments[selected] : null;
@@ -347,10 +352,37 @@ export default function Workspace() {
   const selectedGoalSummary = goalPanelState && selectedGoal
     ? summarizeGoalPortfolio(goalPanelState.plans, goalPanelState.actions, goalPanelState.evidence, new Date(), goalPanelState.evaluations).find(summary => summary.goalPlanId === selectedGoal.id) ?? null
     : null;
+  const agentContextSelection: AgentContextSelection = selectedProject
+    ? { layer: 'project', projectId: selectedProject.id }
+    : legacyContext
+      ? { layer: 'graph', graphNodeId: legacyContext.id }
+      : goalDetail?.kind === 'action'
+        ? { layer: 'task', goalPlanId: goalDetail.goal.id, actionId: goalDetail.action.id }
+        : goalDetail?.kind === 'evidence'
+          ? { layer: 'evidence', goalPlanId: goalDetail.goal.id, evidenceId: goalDetail.evidence.id }
+        : focusedAction
+          ? { layer: 'task', goalPlanId: focusedAction.goalPlanId, actionId: focusedAction.actionId }
+          : selectedGoal
+            ? { layer: 'goal', goalPlanId: selectedGoal.id }
+            : { layer: 'portfolio' };
+  const agentContextBreadcrumb = selectedProject
+    ? `目标组合 / 共享项目 / ${selectedProject.title}`
+    : legacyContext
+      ? `目标组合 / 证据判定图谱 / ${legacyContext.type}：${legacyContext.title}`
+      : goalDetail?.kind === 'action'
+        ? `目标组合 / ${goalDetail.goal.title} / ${goalDetail.action.title}`
+        : goalDetail?.kind === 'evidence'
+          ? `目标组合 / ${goalDetail.goal.title} / 证据 / ${goalDetail.evidence.reference}`
+        : focusedAction
+          ? `目标组合 / ${focusedAction.goalTitle} / ${focusedAction.title}`
+          : selectedGoal
+            ? `目标组合 / ${selectedGoal.title}`
+            : '目标组合';
 
   const openPortfolio = useCallback(() => {
     setSelectedProject(null);
     setFocusedAction(null);
+    setLegacyContextNode(null);
     setGoalDetail(null);
     navigate({ type: 'show-portfolio' });
     setSelected('goal');
@@ -360,6 +392,7 @@ export default function Workspace() {
   const openGoal = useCallback((goalPlanId: string) => {
     setSelectedProject(null);
     setFocusedAction(null);
+    setLegacyContextNode(null);
     setGoalDetail(null);
     navigate({ type: 'open-goal', goalPlanId, scrollTop: window.scrollY });
     setSelected('goal');
@@ -374,6 +407,7 @@ export default function Workspace() {
       goalPlanId: detail.goal.id,
     };
     setSelectedProject(null);
+    setLegacyContextNode(null);
     setGoalDetail(detail);
     navigate({ type: 'open-detail', detail: ref, scrollTop: window.scrollY });
     setSelected(nodeId);
@@ -436,13 +470,13 @@ export default function Workspace() {
         <details className="legacy-navigation">
           <summary>证据判定图谱</summary>
           <div className="tree">{nodes.map((node, index) => <button key={node.id} className={`${selected === node.id ? 'active ' : ''}${index ? 'child' : ''}`} onClick={() => {
-            setSelectedProject(null); setFocusedAction(null); setSelectedGoalPlanId(null); setLegacyToolsOpen(true); void select(node.id);
+            setSelectedProject(null); setFocusedAction(null); setSelectedGoalPlanId(null); setLegacyToolsOpen(true); setLegacyContextNode(node.id); void select(node.id);
             window.setTimeout(() => document.getElementById('legacy-workspace-tools')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
           }}>
             <span className="node-icon">{index === 0 ? '◉' : index === 1 ? '□' : '◇'}</span><span>{node.title}</span>
           </button>)}</div>
         </details>
-        <ProjectNavigation selectedProjectId={selectedProject?.id} onSelect={project => { setSelectedProject(project); setFocusedAction(null); setSelectedGoalPlanId(null); setGoalDetail(null); }} onProjectsChange={syncProjectDetails} />
+        <ProjectNavigation selectedProjectId={selectedProject?.id} onSelect={project => { setSelectedProject(project); setFocusedAction(null); setLegacyContextNode(null); setSelectedGoalPlanId(null); setGoalDetail(null); }} onProjectsChange={syncProjectDetails} />
         {scheduledGoals.length > 0 && <>
           <div className="tree-label daily-plan-tree-label">本周行动归属</div>
           <div className="tree">{scheduledGoals.map(action => (
@@ -518,7 +552,7 @@ export default function Workspace() {
           </div>
           <div className="map">
             {nodes.filter(node => node.id !== selected).map(node => (
-              <button className="map-item" key={node.id} onClick={() => void select(node.id)}>
+              <button className="map-item" key={node.id} onClick={() => { setLegacyContextNode(node.id); void select(node.id); }}>
                 <span className="map-icon">{node.type === '任务' ? '□' : node.type === '目标' ? '◉' : '◇'}</span>
                 <span><small>{node.type}</small><strong>{node.title}</strong><em>{node.description}</em></span>
                 <span className="arrow">↗</span>
@@ -726,6 +760,7 @@ export default function Workspace() {
           </div>}
         </div>
       </aside>
+      <AgentAssistant selection={agentContextSelection} breadcrumb={agentContextBreadcrumb} />
     </main>
   );
 }
