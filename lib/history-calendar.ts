@@ -1,7 +1,7 @@
-import { listGoalPlans, type GoalPlan, type GoalPlanAction } from './goal-plans';
-import { listEvidence, openDatabase } from './store';
+import { listGoalPlans, type GoalPlan, type GoalPlanAction, type GoalPlanStatus } from './goal-plans';
+import { openDatabase } from './store';
 
-export type HistoryCalendarGoal = { id: string; title: string; status: 'active' | 'completed' };
+export type HistoryCalendarGoal = { id: string; title: string; status: GoalPlanStatus };
 export type HistoryCalendarActivity = {
   id: string;
   kind: 'action' | 'goal_completed';
@@ -23,16 +23,15 @@ export type HistoryCalendarDay = {
   date: string;
   activities: HistoryCalendarActivity[];
   evidence: HistoryCalendarEvidence[];
-  unassignedEvidence: Array<{ id: string; text: string; source: string; reference: string; level: string; links: string[] }>;
 };
 export type UndatedHistoryActivity = { id: string; goalPlanId: string; goalTitle: string; title: string };
 export type HistoryCalendar = { goals: HistoryCalendarGoal[]; days: HistoryCalendarDay[]; undatedActivities: UndatedHistoryActivity[] };
 type CompletedGoalAction = Pick<GoalPlanAction, 'id' | 'goalPlanId' | 'goalTitle' | 'title' | 'completedAt' | 'evidenceRequirement'>;
 
-function dateKey(timestamp: string): string | null {
+function dateKey(timestamp: string, timeZone: string): string | null {
   const time = Date.parse(timestamp);
   if (!Number.isFinite(time)) return null;
-  const parts = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(time);
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(time);
   const values = new Map(parts.map(part => [part.type, part.value]));
   const year = values.get('year');
   const month = values.get('month');
@@ -40,10 +39,10 @@ function dateKey(timestamp: string): string | null {
   return year && month && day ? `${year}-${month}-${day}` : null;
 }
 
-function activityForCompletedAction(action: CompletedGoalAction): HistoryCalendarActivity | null {
+function activityForCompletedAction(action: CompletedGoalAction, timeZone: string): HistoryCalendarActivity | null {
   const completedAt = action.completedAt;
   if (!completedAt) return null;
-  const date = dateKey(completedAt);
+  const date = dateKey(completedAt, timeZone);
   if (!date) return null;
   return {
     id: action.id,
@@ -57,29 +56,14 @@ function activityForCompletedAction(action: CompletedGoalAction): HistoryCalenda
 }
 
 function historyPlans(plans: GoalPlan[]) {
-  return plans.filter((plan): plan is GoalPlan & { status: 'active' | 'completed' } => plan.status === 'active' || plan.status === 'completed');
+  return plans.filter((plan): plan is GoalPlan & { status: Exclude<GoalPlanStatus, 'draft'> } => plan.status !== 'draft');
 }
 
-export function getHistoryCalendar(): HistoryCalendar {
+export function getHistoryCalendar(timeZone = 'UTC'): HistoryCalendar {
+  new Intl.DateTimeFormat('en', { timeZone }).format(new Date(0));
   const plans = historyPlans(listGoalPlans());
   const goals = plans.map(plan => ({ id: plan.id, title: plan.title ?? '未命名目标', status: plan.status }));
-  const unassignedEvidence = listEvidence().flatMap(item => {
-    const date = dateKey(item.observedAt);
-    if (!date) return [];
-    return [{
-      date,
-      evidence: { id: item.id, text: item.text, source: item.source, reference: item.reference, level: item.level, links: [...item.links] },
-    }];
-  });
-  if (!plans.length) {
-    const byDate = new Map<string, HistoryCalendarDay>();
-    for (const item of unassignedEvidence) {
-      const day = byDate.get(item.date) ?? { date: item.date, activities: [], evidence: [], unassignedEvidence: [] };
-      day.unassignedEvidence.push(item.evidence);
-      byDate.set(item.date, day);
-    }
-    return { goals, days: [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)), undatedActivities: [] };
-  }
+  if (!plans.length) return { goals, days: [], undatedActivities: [] };
 
   const database = openDatabase();
   let actions: CompletedGoalAction[];
@@ -115,14 +99,14 @@ export function getHistoryCalendar(): HistoryCalendar {
   };
 
   for (const action of actions) {
-    const activity = activityForCompletedAction(action);
-    if (activity) dayFor(dateKey(activity.completedAt)!).activities.push(activity);
+    const activity = activityForCompletedAction(action, timeZone);
+    if (activity) dayFor(dateKey(activity.completedAt, timeZone)!).activities.push(activity);
     else undatedActivities.push({ id: action.id, goalPlanId: action.goalPlanId, goalTitle: action.goalTitle, title: action.title });
   }
 
   for (const plan of plans) {
     for (const event of plan.lifecycleEvents.filter(item => item.action === 'completion_confirmed')) {
-      const date = dateKey(event.createdAt);
+      const date = dateKey(event.createdAt, timeZone);
       if (!date) continue;
       const day = dayFor(date);
       day.activities.push({
@@ -148,8 +132,6 @@ export function getHistoryCalendar(): HistoryCalendar {
     }
   }
 
-  for (const item of unassignedEvidence) dayFor(item.date).unassignedEvidence.push(item.evidence);
-
   return {
     goals,
     undatedActivities,
@@ -157,7 +139,6 @@ export function getHistoryCalendar(): HistoryCalendar {
       ...day,
       activities: day.activities.sort((a, b) => a.completedAt.localeCompare(b.completedAt) || a.id.localeCompare(b.id)),
       evidence: day.evidence.sort((a, b) => a.goalTitle.localeCompare(b.goalTitle) || a.id.localeCompare(b.id)),
-      unassignedEvidence: day.unassignedEvidence.sort((a, b) => a.reference.localeCompare(b.reference) || a.id.localeCompare(b.id)),
     })),
   };
 }

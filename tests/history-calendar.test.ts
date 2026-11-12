@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, saveEvidence } from '../lib/store';
+import { confirmDailyPlan, generateAndSaveDailyPlan, getDailyPlan } from '../lib/daily-plan-store';
 import { activateGoalPlan, listGoalPlanActions, markGoalPlanActionDone, saveGoalPlanDraft, transitionGoalPlan, updateGoalPlanAction } from '../lib/goal-plans';
 import { getHistoryCalendar } from '../lib/history-calendar';
 
@@ -24,14 +25,14 @@ function completePlan(title = '英语学习目标') {
 }
 
 describe('只读历史日历', () => {
-  it('按完成日期展示目标行动，并把确认完成时提交的证据作为标记', () => {
+  it('按明确时区的完成日期展示行动，并把目标完成证据作为标记', () => {
     const draft = saveGoalPlanDraft(completePlan());
     activateGoalPlan(draft.id);
     const action = listGoalPlanActions(draft.id)[0];
     const database = openDatabase();
     try {
       database.prepare("UPDATE goal_plan_actions SET status='done', completed_at=?, updated_at=? WHERE id=?")
-        .run('2026-11-04T10:00:00.000Z', '2026-11-08T10:00:00.000Z', action.id);
+        .run('2026-11-04T01:00:00.000Z', '2026-11-08T10:00:00.000Z', action.id);
     } finally {
       database.close();
     }
@@ -42,25 +43,28 @@ describe('只读历史日历', () => {
     });
     transitionGoalPlan(draft.id, { action: 'confirm_completion', confirmed: true });
 
-    const history = getHistoryCalendar();
+    const history = getHistoryCalendar('America/Los_Angeles');
     expect(history.goals).toContainEqual({ id: draft.id, title: '英语学习目标', status: 'completed' });
     expect(history.days).toContainEqual(expect.objectContaining({
-      date: '2026-11-04',
+      date: '2026-11-03',
       activities: [expect.objectContaining({ kind: 'action', goalPlanId: draft.id, title: '录制英文介绍' })],
     }));
     const completionDay = history.days.find(day => day.activities.some(activity => activity.kind === 'goal_completed'));
     expect(completionDay?.evidence).toEqual([expect.objectContaining({ level: 'E3', description: '导师确认录音表达清晰。' })]);
   });
 
-  it('只列入活跃或已完成目标，不把待排行动当作实际活动', () => {
-    const active = saveGoalPlanDraft(completePlan('进行中的目标'));
-    activateGoalPlan(active.id);
+  it('保留暂停目标的历史活动并排除草稿目标', () => {
+    const paused = saveGoalPlanDraft(completePlan('后来暂停的目标'));
+    activateGoalPlan(paused.id);
+    const action = listGoalPlanActions(paused.id)[0];
+    markGoalPlanActionDone(action.id);
+    transitionGoalPlan(paused.id, { action: 'pause', reason: '暂缓投入' });
     const draft = saveGoalPlanDraft(completePlan('尚未启用的目标'));
 
     const history = getHistoryCalendar();
-    expect(history.goals.map(goal => goal.id)).toContain(active.id);
+    expect(history.goals).toContainEqual(expect.objectContaining({ id: paused.id, status: 'paused' }));
     expect(history.goals.map(goal => goal.id)).not.toContain(draft.id);
-    expect(history.days).toEqual([]);
+    expect(history.days.flatMap(day => day.activities)).toContainEqual(expect.objectContaining({ goalPlanId: paused.id, title: action.title }));
   });
 
   it('保存独立完成时间，后续编辑不会把行动移到另一天', () => {
@@ -94,7 +98,7 @@ describe('只读历史日历', () => {
     expect(history.undatedActivities).toEqual([expect.objectContaining({ title: action.title, goalPlanId: draft.id })]);
   });
 
-  it('显示未归属具体目标的通用任务证据，不把它挂到某个目标', () => {
+  it('不把未归属具体目标的通用证据混进目标日历', () => {
     const plan = saveGoalPlanDraft(completePlan());
     activateGoalPlan(plan.id);
     saveEvidence({
@@ -103,9 +107,30 @@ describe('只读历史日历', () => {
     });
 
     const history = getHistoryCalendar();
-    expect(history.days.find(day => day.date === '2026-11-05')?.unassignedEvidence).toEqual([
-      expect.objectContaining({ text: '一次任务反馈', reference: 'note-1', links: ['task'] }),
-    ]);
-    expect(history.days.find(day => day.date === '2026-11-05')?.evidence).toEqual([]);
+    expect(history.days).toEqual([]);
+  });
+
+  it('已确认周计划仍是安排记录，只有显式完成记录才进入历史', () => {
+    const draft = saveGoalPlanDraft(completePlan());
+    activateGoalPlan(draft.id);
+    const [action] = listGoalPlanActions(draft.id);
+    const weekStart = '2020-11-09';
+    const planned = generateAndSaveDailyPlan(weekStart);
+    const scheduledDate = planned.days.find(day => day.actions.some(item => item.actionId === action.id))!.date;
+    confirmDailyPlan(weekStart);
+
+    expect(getDailyPlan(weekStart).status).toBe('confirmed');
+    expect(getHistoryCalendar('Asia/Shanghai').days).toEqual([]);
+
+    const completed = markGoalPlanActionDone(action.id);
+    const expectedDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(completed.completedAt!));
+    expect(getDailyPlan(weekStart).status).toBe('confirmed');
+    const historyDate = getHistoryCalendar('Asia/Shanghai').days[0].date;
+    expect(historyDate).toBe(expectedDate);
+    expect(historyDate).not.toBe(scheduledDate);
+  });
+
+  it('拒绝无效时区，避免静默回退到服务器时区', () => {
+    expect(() => getHistoryCalendar('Not/A_Time_Zone')).toThrow();
   });
 });
