@@ -1,4 +1,4 @@
-import { getWeeklyReview, saveWeeklyReview } from '../../../lib/weekly-review-store';
+import { confirmWeeklyReviewAdjustment, getWeeklyReview, saveWeeklyReview } from '../../../lib/weekly-review-store';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,5 +21,16 @@ export async function PUT(request: Request) {
     return Response.json(saveWeeklyReview(input.weekStart, input.adjustment, input.timeZone ?? 'UTC'));
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : '无法保存周复盘' }, { status: 400 });
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const input = await request.json() as { weekStart?: unknown; timeZone?: unknown };
+    if (typeof input.weekStart !== 'string') throw new Error('请指定周复盘的周一日期。');
+    if (input.timeZone !== undefined && typeof input.timeZone !== 'string') throw new Error('时区格式无效。');
+    return Response.json(confirmWeeklyReviewAdjustment(input.weekStart, input.timeZone ?? 'UTC'));
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : '无法确认周复盘建议' }, { status: 400 });
   }
 }

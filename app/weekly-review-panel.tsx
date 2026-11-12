@@ -89,6 +89,26 @@ export default function WeeklyReviewPanel() {
     }
   }
 
+  async function confirmAdjustment() {
+    if (!weekStart || !record || record.status !== 'saved') return;
+    setBusy(true);
+    try {
+      const response = await fetch('/api/weekly-review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ weekStart, timeZone: timeZone() }),
+      });
+      const data = await response.json() as WeeklyReviewRecord & { error?: string };
+      if (!response.ok) throw new Error(data.error || '无法确认复盘建议');
+      setRecord(data);
+      setError('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法确认复盘建议');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const saved = record?.status === 'saved';
   const review = record?.review;
 
@@ -142,7 +162,20 @@ export default function WeeklyReviewPanel() {
           <label>预期结果<textarea value={adjustment.expectedResult} disabled={saved || busy} rows={2} onChange={event => setAdjustment({ ...adjustment, expectedResult: event.target.value })} /></label>
           <label>验证日期<input type="date" min={addDays(review.weekEnd, 1)} value={adjustment.verificationDate} disabled={saved || busy} onChange={event => setAdjustment({ ...adjustment, verificationDate: event.target.value })} /></label>
           {saved ? <p className="weekly-review-saved-at">已于 {new Date(record.savedAt!).toLocaleString('zh-CN')} 核对保存{adjustment.modifiedByUser ? '，并记录了你的调整' : ''}；再次打开该周会恢复同一份复盘。</p> : <button className="primary-button" disabled={busy} onClick={() => void save()}>{busy ? '保存中…' : '核对并保存本周复盘'}</button>}
+          {saved && record.followup?.state === 'confirmed' ? <p className="weekly-review-followup-confirmed">已{record.followup.decision === 'accepted' ? '接受' : '修改并确认'}建议，创建待排任务「{record.followup.taskTitle}」（{record.followup.actionId}），关联里程碑「{record.followup.milestoneTitle}」。下次复盘会追踪此任务、证据和结果。</p>
+            : saved && adjustment.kind !== 'setup' && adjustment.goalPlanId && adjustment.milestoneId
+              ? <button className="primary-button" disabled={busy} onClick={() => void confirmAdjustment()}>{busy ? '创建中…' : `确认${adjustment.modifiedByUser ? '修改后的' : '接受'}建议并创建待排任务`}</button>
+              : saved ? <p className="weekly-review-saved-at">该建议没有可关联的实际目标里程碑，目前无法创建跟踪任务。</p> : null}
         </section>
+        {review.followups.length ? <section className="weekly-review-followups"><h3>上次复盘建议追踪</h3>
+          {review.followups.map(trace => <article key={`${trace.sourceWeekStart}-${trace.actionId}`}>
+            <strong>{trace.sourceWeekStart} 周 · {trace.decision === 'accepted' ? '已接受建议' : '已修改并确认建议'} · {trace.taskTitle}</strong>
+            <span>目标：{trace.goalTitle} · 里程碑：{trace.milestoneTitle} · 规则契约 v{trace.contractVersion}（{new Date(trace.contractEffectiveAt).toLocaleString('zh-CN')} 生效）</span>
+            <span>原建议：{trace.originalSuggestion.title}；确认内容：{trace.adjustment.title}；任务状态：{trace.status === 'not_executed' ? '截至本周未执行' : trace.status === 'completed_no_evidence' ? '已完成但缺少关联证据' : trace.status === 'evidence_insufficient' ? `证据未达到 ${trace.requiredEvidenceLevel} 门槛` : trace.outcome === 'met' ? '结果达到标准' : trace.outcome === 'not_met' ? '结果未达到标准' : '已有证据，结果需人工复核'}</span>
+            <small>{trace.resultSummary}</small>
+            {trace.evidence.length ? <ul>{trace.evidence.map(evidence => <li key={evidence.id}><strong>{evidence.level} · {evidence.source} · {evidence.reference}</strong><span>{evidence.text}</span><small>{evidence.goalActionTitle} · {new Date(evidence.observedAt).toLocaleString('zh-CN')}</small></li>)}</ul> : null}
+          </article>)}
+        </section> : null}
       </>}
     </section>
   );

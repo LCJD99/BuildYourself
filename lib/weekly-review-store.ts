@@ -7,6 +7,7 @@ import {
   listGoalPlanContractVersions,
   listGoalPlanEvaluations,
   listGoalPlans,
+  createGoalPlanActionForWeeklyReview,
   type GoalMilestone,
   type GoalPlan,
   type GoalPlanContractVersion,
@@ -50,6 +51,39 @@ export type WeeklyMilestoneReview = {
   evidenceIds: string[];
   status: string;
   gap: string;
+};
+
+export type WeeklyReviewFollowupDecision = 'accepted' | 'modified';
+export type WeeklyReviewFollowupState = 'creating' | 'confirmed';
+export type WeeklyReviewFollowupSnapshot = {
+  sourceWeekStart: string;
+  decision: WeeklyReviewFollowupDecision;
+  originalSuggestion: WeeklyReviewAdjustment;
+  adjustment: WeeklyReviewAdjustment;
+  goalPlanId: string;
+  goalTitle: string;
+  milestoneId: string;
+  milestoneTitle: string;
+  contractVersion: number;
+  contractEffectiveAt: string;
+  milestoneCriteria: string | null;
+  evidenceRequirementSource: string;
+  requiredEvidenceLevel: EvidenceLevel;
+  confirmedAt: string;
+};
+
+export type WeeklyReviewFollowup = WeeklyReviewFollowupSnapshot & {
+  state: WeeklyReviewFollowupState;
+  actionId: string | null;
+  taskTitle: string;
+};
+
+export type WeeklyReviewFollowupTrace = WeeklyReviewFollowup & {
+  status: 'not_executed' | 'completed_no_evidence' | 'evidence_insufficient' | 'result_available';
+  completedAt: string | null;
+  evidence: WeeklyReviewEvidence[];
+  outcome: 'met' | 'not_met' | 'requires_review' | null;
+  resultSummary: string;
 };
 
 export type WeeklyGoalReview = {
@@ -116,10 +150,12 @@ export type WeeklyReview = {
   deviations: string[];
   facts: string[];
   hypotheses: string[];
+  suggestedAdjustment: WeeklyReviewAdjustment;
   adjustment: WeeklyReviewAdjustment;
+  followups: WeeklyReviewFollowupTrace[];
 };
 
-export type WeeklyReviewRecord = { review: WeeklyReview; status: 'draft' | 'saved'; savedAt: string | null };
+export type WeeklyReviewRecord = { review: WeeklyReview; status: 'draft' | 'saved'; savedAt: string | null; followup: WeeklyReviewFollowup | null };
 type GoalActionRelation = { id: string; goalPlanId: string; title: string; status: 'pending_schedule' | 'scheduled' | 'done'; milestoneId: string | null; evidenceRequirement: string | null; completedAt: string | null };
 type WeeklyReviewGoalPlan = GoalPlan & { reviewContractEffectiveAt: string | null };
 
@@ -366,6 +402,69 @@ function evidenceSnapshot(item: Evidence, goalTitle: string | null, goalActionTi
   };
 }
 
+function listFollowupTraces(weekStart: string, nextWeekStart: string, timeZone: string): WeeklyReviewFollowupTrace[] {
+  const database = ensureSchema();
+  let rows: Array<WeeklyReviewFollowupRow & {
+    goal_plan_id: string;
+    action_title: string | null;
+    action_status: string | null;
+    completed_at: string | null;
+  }>;
+  try {
+    rows = database.prepare(`SELECT f.review_week_start,f.action_id,f.payload_json,f.status,f.goal_plan_id,
+      a.title AS action_title,a.status AS action_status,a.completed_at
+      FROM weekly_review_followups f LEFT JOIN goal_plan_actions a ON a.id=f.action_id
+      WHERE f.status='confirmed' AND f.review_week_start<? ORDER BY f.review_week_start,f.action_id`)
+      .all(weekStart) as typeof rows;
+  } finally {
+    database.close();
+  }
+  const allEvidence = listEvidence();
+  return rows.flatMap(row => {
+    const payload = JSON.parse(row.payload_json) as WeeklyReviewFollowupSnapshot & { taskTitle: string };
+    const confirmedDate = dateKey(payload.confirmedAt, timeZone);
+    if (!row.action_id || !confirmedDate || confirmedDate >= nextWeekStart) return [];
+    const completedDate = row.completed_at ? dateKey(row.completed_at, timeZone) : null;
+    const completedByReview = row.action_status === 'done' && Boolean(row.completed_at && Date.parse(row.completed_at) >= Date.parse(payload.confirmedAt)
+      && completedDate && completedDate < nextWeekStart);
+    const linkedEvidence = allEvidence.filter(item => item.goalPlanId === payload.goalPlanId && item.goalActionId === row.action_id
+      && Date.parse(item.observedAt) >= Date.parse(payload.confirmedAt)
+      && (dateKey(item.observedAt, timeZone) ?? '') < nextWeekStart);
+    const evidence = linkedEvidence.map(item => evidenceSnapshot(item, payload.goalTitle, payload.taskTitle));
+    const base: WeeklyReviewFollowupTrace = {
+      ...payload, state: 'confirmed', actionId: row.action_id, taskTitle: row.action_title ?? payload.taskTitle,
+      status: 'not_executed', completedAt: completedByReview ? row.completed_at : null,
+      evidence, outcome: null, resultSummary: '',
+    };
+    if (!completedByReview) return [{ ...base, resultSummary: '截至本复盘周，任务没有完成记录。' }];
+    if (!linkedEvidence.length) return [{
+      ...base, status: 'completed_no_evidence', resultSummary: `任务已于 ${row.completed_at} 完成，但没有找到确认后的关联证据。`,
+    }];
+
+    const qualifiedEvidence = linkedEvidence.filter(item => evidenceLevelRank[item.level] >= evidenceLevelRank[payload.requiredEvidenceLevel]);
+    if (!qualifiedEvidence.length) return [{
+      ...base, status: 'evidence_insufficient', resultSummary: `任务已完成并有 ${linkedEvidence.length} 条关联证据，但没有证据达到 ${payload.requiredEvidenceLevel} 门槛。`,
+    }];
+
+    const acceptedTarget = parseLatencyTarget({ successCriteria: payload.adjustment.expectedResult } as GoalMilestone);
+    const threshold = acceptedTarget ?? (payload.decision === 'accepted'
+      ? parseLatencyTarget({ successCriteria: payload.milestoneCriteria } as GoalMilestone)
+      : null);
+    const measured = latestCompleteMeasurement(qualifiedEvidence, payload.requiredEvidenceLevel);
+    if (threshold && measured) {
+      const met = threshold.inclusive ? measured.latencyMs! <= threshold.limit : measured.latencyMs! < threshold.limit;
+      return [{
+        ...base, status: 'result_available', outcome: met ? 'met' : 'not_met',
+        resultSummary: `完整实测为 ${measured.latencyMs} ms，${met ? '达到' : '未达到'}${acceptedTarget ? '已确认建议中的' : `契约 v${payload.contractVersion} 的`}标准${threshold.inclusive ? '不高于' : '低于'} ${threshold.limit} ms。`,
+      }];
+    }
+    return [{
+      ...base, status: 'result_available', outcome: 'requires_review',
+      resultSummary: `已有 ${qualifiedEvidence.length} 条达到 ${payload.requiredEvidenceLevel} 门槛的关联结果证据，需按原建议预期核对。`,
+    }];
+  });
+}
+
 function summarizeMilestone(goal: WeeklyReviewGoalPlan, milestone: GoalMilestone, actions: GoalActionRelation[], activities: HistoryCalendarActivity[], evidence: Evidence[]): WeeklyMilestoneReview {
   const milestoneActions = actions.filter(action => action.milestoneId === milestone.id);
   const actionIds = new Set(milestoneActions.map(action => action.id));
@@ -569,6 +668,7 @@ export function generateWeeklyReview(weekStart: string, timeZone = 'UTC'): Weekl
   const evidenceById = new Map(allEvidence.map(item => [item.id, item]));
   const activeGoalActions = goalActions.filter(action => activeGoalIds.has(action.goalPlanId));
   const adjustment = makeAdjustment(weekStart, activeGoals, activeGoalActions, [...evidenceById.values()]);
+  const followups = listFollowupTraces(weekStart, nextWeekStart, timeZone);
   return {
     weekStart, weekEnd, timeZone,
     executionEffort: {
@@ -583,7 +683,9 @@ export function generateWeeklyReview(weekStart: string, timeZone = 'UTC'): Weekl
     deviations,
     facts,
     hypotheses,
+    suggestedAdjustment: adjustment,
     adjustment,
+    followups,
   };
 }
 
@@ -594,13 +696,71 @@ function ensureSchema() {
     review_json TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('draft', 'saved')),
     saved_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS weekly_review_followups (
+    review_week_start TEXT PRIMARY KEY REFERENCES weekly_reviews(week_start) ON DELETE CASCADE,
+    goal_plan_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    action_id TEXT UNIQUE,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('creating', 'confirmed')),
+    confirmed_at TEXT NOT NULL
   )`);
   return database;
 }
 
+type WeeklyReviewFollowupRow = {
+  review_week_start: string;
+  action_id: string | null;
+  payload_json: string;
+  status: WeeklyReviewFollowupState;
+};
+
+function readFollowup(database: ReturnType<typeof openDatabase>, weekStart: string): WeeklyReviewFollowup | null {
+  const row = database.prepare('SELECT review_week_start, action_id, payload_json, status FROM weekly_review_followups WHERE review_week_start=?')
+    .get(weekStart) as WeeklyReviewFollowupRow | undefined;
+  if (!row) return null;
+  const payload = JSON.parse(row.payload_json) as WeeklyReviewFollowupSnapshot & { taskTitle: string };
+  return { ...payload, state: row.status, actionId: row.action_id, taskTitle: payload.taskTitle };
+}
+
+function createFollowupIntent(weekStart: string, payload: WeeklyReviewFollowupSnapshot & { taskTitle: string }): WeeklyReviewFollowup {
+  const database = ensureSchema();
+  let inTransaction = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    const existing = readFollowup(database, weekStart);
+    if (existing) {
+      database.exec('COMMIT');
+      inTransaction = false;
+      return existing;
+    }
+    database.prepare(`INSERT INTO weekly_review_followups
+      (review_week_start,goal_plan_id,milestone_id,action_id,payload_json,status,confirmed_at)
+      VALUES (?,?,?,NULL,?,'creating',?)`)
+      .run(weekStart, payload.goalPlanId, payload.milestoneId, JSON.stringify(payload), payload.confirmedAt);
+    database.exec('COMMIT');
+    inTransaction = false;
+    return { ...payload, state: 'creating', actionId: null, taskTitle: payload.taskTitle };
+  } catch (error) {
+    if (inTransaction) database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
 function readRecord(database: ReturnType<typeof openDatabase>, weekStart: string): WeeklyReviewRecord | null {
   const row = database.prepare('SELECT review_json, status, saved_at FROM weekly_reviews WHERE week_start=?').get(weekStart) as { review_json: string; status: 'draft' | 'saved'; saved_at: string | null } | undefined;
-  return row ? { review: JSON.parse(row.review_json) as WeeklyReview, status: row.status, savedAt: row.saved_at } : null;
+  if (!row) return null;
+  const saved = JSON.parse(row.review_json) as Partial<WeeklyReview>;
+  const review = {
+    ...saved,
+    suggestedAdjustment: saved.suggestedAdjustment ?? saved.adjustment!,
+    followups: saved.followups ?? [],
+  } as WeeklyReview;
+  return { review, status: row.status, savedAt: row.saved_at, followup: readFollowup(database, weekStart) };
 }
 
 function validateAdjustment(input: unknown, generated: WeeklyReviewAdjustment, weekStart: string): WeeklyReviewAdjustment {
@@ -655,7 +815,7 @@ export function getWeeklyReview(weekStart: string, timeZone = 'UTC'): WeeklyRevi
       .run(weekStart, JSON.stringify(generated));
     database.exec('COMMIT');
     inTransaction = false;
-    return { review: generated, status: 'draft', savedAt: null };
+    return { review: generated, status: 'draft', savedAt: null, followup: null };
   } catch (error) {
     if (inTransaction) database.exec('ROLLBACK');
     throw error;
@@ -685,11 +845,70 @@ export function saveWeeklyReview(weekStart: string, adjustment: unknown, timeZon
       .run(JSON.stringify(review), savedAt, weekStart);
     database.exec('COMMIT');
     inTransaction = false;
-    return { review, status: 'saved', savedAt };
+    return { review, status: 'saved', savedAt, followup: null };
   } catch (error) {
     if (inTransaction) database.exec('ROLLBACK');
     throw error;
   } finally {
     database.close();
   }
+}
+
+export function confirmWeeklyReviewAdjustment(weekStart: string, timeZone = 'UTC'): WeeklyReviewRecord {
+  assertWeekStart(weekStart);
+  new Intl.DateTimeFormat('en', { timeZone }).format(new Date(0));
+  const record = getWeeklyReview(weekStart, timeZone);
+  if (record.status !== 'saved') throw new Error('请先核对并保存周复盘建议。');
+  if (record.followup?.state === 'confirmed') return record;
+
+  let followup = record.followup;
+  if (!followup) {
+    const adjustment = record.review.adjustment;
+    if (adjustment.kind === 'setup' || !adjustment.goalPlanId || !adjustment.milestoneId) {
+      throw new Error('当前建议没有可关联的目标里程碑，无法创建待排任务。');
+    }
+    const goal = record.review.goals.find(item => item.goalPlanId === adjustment.goalPlanId);
+    const milestone = goal?.milestones.find(item => item.milestoneId === adjustment.milestoneId);
+    if (!goal || !milestone || goal.contractVersion === null || !goal.contractEffectiveAt) {
+      throw new Error('复盘快照缺少适用的目标契约或里程碑，无法创建任务。');
+    }
+    const confirmedAt = new Date().toISOString();
+    followup = createFollowupIntent(weekStart, {
+      sourceWeekStart: weekStart,
+      decision: adjustment.modifiedByUser ? 'modified' : 'accepted',
+      originalSuggestion: record.review.suggestedAdjustment,
+      adjustment,
+      goalPlanId: goal.goalPlanId,
+      goalTitle: goal.title,
+      milestoneId: milestone.milestoneId,
+      milestoneTitle: milestone.title,
+      contractVersion: goal.contractVersion,
+      contractEffectiveAt: goal.contractEffectiveAt,
+      milestoneCriteria: milestone.successCriteria,
+      evidenceRequirementSource: milestone.evidenceRequirementSource,
+      requiredEvidenceLevel: milestone.requiredEvidenceLevel,
+      confirmedAt,
+      taskTitle: adjustment.title,
+    });
+  }
+
+  const milestoneEvidenceRequirement = `来源标准：${followup.evidenceRequirementSource}；预期结果：${followup.adjustment.expectedResult}`;
+  const task = createGoalPlanActionForWeeklyReview({
+    goalPlanId: followup.goalPlanId,
+    milestoneId: followup.milestoneId,
+    title: followup.taskTitle,
+    details: `来自 ${weekStart} 周复盘的${followup.decision === 'accepted' ? '已接受' : '已修改'}建议：${followup.adjustment.rationale}`,
+    estimateMinutes: null,
+    dependencyIds: [],
+    successCriteria: followup.adjustment.expectedResult,
+    evidenceRequirement: milestoneEvidenceRequirement,
+  }, weekStart);
+  const database = ensureSchema();
+  try {
+    database.prepare(`UPDATE weekly_review_followups SET action_id=?,status='confirmed'
+      WHERE review_week_start=? AND status='creating'`).run(task.id, weekStart);
+  } finally {
+    database.close();
+  }
+  return getWeeklyReview(weekStart, timeZone);
 }

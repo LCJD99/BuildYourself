@@ -7,6 +7,7 @@ import {
   activateGoalPlan,
   createGoalPlanContractChange,
   listGoalPlanActions,
+  listPendingGoalActions,
   listGoalPlans,
   markGoalPlanActionDone,
   recordGoalPlanEvaluation,
@@ -16,7 +17,7 @@ import {
 } from '../lib/goal-plans';
 import { confirmDailyPlan, generateAndSaveDailyPlan } from '../lib/daily-plan-store';
 import { openDatabase, saveEvidence } from '../lib/store';
-import { getWeeklyReview, saveWeeklyReview } from '../lib/weekly-review-store';
+import { confirmWeeklyReviewAdjustment, getWeeklyReview, saveWeeklyReview } from '../lib/weekly-review-store';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-weekly-review-'));
 beforeEach(() => { process.env.BUILDYOURSELF_DB = join(dir, `${randomUUID()}.sqlite`); });
@@ -32,6 +33,12 @@ function currentWeekStart() {
 function previousWeekStart() {
   const date = new Date(`${currentWeekStart()}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() - 7);
+  return date.toISOString().slice(0, 10);
+}
+
+function nextWeekStart(weekStart: string) {
+  const date = new Date(`${weekStart}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + 7);
   return date.toISOString().slice(0, 10);
 }
 
@@ -334,6 +341,127 @@ describe('目标周复盘', () => {
     expect(saved.review.adjustment.modifiedByUser).toBe(true);
     expect(getWeeklyReview(weekStart, 'UTC')).toEqual(saved);
     expect(saveWeeklyReview(weekStart, { ...draft.review.adjustment, title: '后续改写' }, 'UTC')).toEqual(saved);
+  });
+
+  it('接受已保存的建议会创建带来源记录的里程碑待排任务，并支持幂等重试', () => {
+    const weekStart = currentWeekStart();
+    const goalPlanId = createGoalPlan();
+    scheduleGoal(weekStart);
+    const draft = getWeeklyReview(weekStart, 'UTC');
+    const saved = saveWeeklyReview(weekStart, draft.review.adjustment, 'UTC');
+    const confirmed = confirmWeeklyReviewAdjustment(weekStart, 'UTC');
+    const adjustment = saved.review.adjustment;
+    const task = listPendingGoalActions().find(action => action.id === confirmed.followup?.actionId);
+
+    expect(confirmed.followup).toMatchObject({
+      decision: 'accepted', goalPlanId, milestoneId: adjustment.milestoneId,
+      originalSuggestion: { title: draft.review.suggestedAdjustment.title },
+      adjustment: { title: adjustment.title },
+    });
+    expect(task).toMatchObject({
+      id: confirmed.followup?.actionId, goalPlanId, milestoneId: adjustment.milestoneId,
+      title: adjustment.title, status: 'pending_schedule', successCriteria: adjustment.expectedResult,
+    });
+    expect(confirmWeeklyReviewAdjustment(weekStart, 'UTC')).toEqual(confirmed);
+  });
+
+  it('保存并修改建议后确认会记录修改决定并按修改内容创建任务', () => {
+    const weekStart = currentWeekStart();
+    const goalPlanId = createGoalPlan();
+    scheduleGoal(weekStart);
+    const draft = getWeeklyReview(weekStart, 'UTC');
+    const edited = {
+      ...draft.review.adjustment,
+      title: '固定测试样本后复测',
+      expectedResult: '完整基准测试结果必须达到 E2，且响应延迟低于 100 ms。',
+    };
+    saveWeeklyReview(weekStart, edited, 'UTC');
+
+    const confirmed = confirmWeeklyReviewAdjustment(weekStart, 'UTC');
+    const actionId = confirmed.followup?.actionId;
+    expect(actionId).toBeTruthy();
+    if (!actionId) throw new Error('expected confirmed follow-up action');
+    expect(confirmed.followup).toMatchObject({
+      decision: 'modified', goalPlanId, originalSuggestion: { title: draft.review.suggestedAdjustment.title },
+      adjustment: { title: edited.title }, taskTitle: edited.title,
+    });
+    markGoalPlanActionDone(actionId);
+    saveBenchmark(goalPlanId, actionId, 150);
+    expect(getWeeklyReview(nextWeekStart(weekStart), 'UTC').review.followups[0]).toMatchObject({
+      outcome: 'not_met', requiredEvidenceLevel: 'E2',
+      adjustment: { expectedResult: edited.expectedResult },
+      milestoneCriteria: '完整基准测试响应延迟低于 200 ms',
+    });
+  });
+
+  it('下次复盘区分未执行、完成缺证据和有可判断结果，并保留来源证据', () => {
+    const weekStart = currentWeekStart();
+    const goalPlanId = createGoalPlan();
+    scheduleGoal(weekStart);
+    const draft = getWeeklyReview(weekStart, 'UTC');
+    saveWeeklyReview(weekStart, draft.review.adjustment, 'UTC');
+    const confirmed = confirmWeeklyReviewAdjustment(weekStart, 'UTC');
+    const actionId = confirmed.followup?.actionId;
+    expect(actionId).toBeTruthy();
+    if (!actionId) throw new Error('expected confirmed follow-up action');
+
+    const notExecuted = getWeeklyReview(nextWeekStart(weekStart), 'UTC').review.followups[0];
+    expect(notExecuted).toMatchObject({ status: 'not_executed', actionId, evidence: [] });
+
+    markGoalPlanActionDone(actionId);
+    const completedWithoutEvidence = getWeeklyReview(nextWeekStart(nextWeekStart(weekStart)), 'UTC').review.followups[0];
+    expect(completedWithoutEvidence).toMatchObject({ status: 'completed_no_evidence', actionId });
+
+    const evidence = saveEvidence({
+      text: '复测延迟 190 ms', source: '独立测试报告', reference: 'accepted-followup-report',
+      observedAt: new Date().toISOString(), links: ['milestone'], level: 'E2',
+      reportSubmitted: null, latencyMs: 190, benchmarkComplete: true, goalPlanId, goalActionId: actionId,
+    });
+    const withResult = getWeeklyReview(nextWeekStart(nextWeekStart(nextWeekStart(weekStart))), 'UTC').review.followups[0];
+    expect(withResult).toMatchObject({ status: 'result_available', actionId, outcome: 'met' });
+    expect(withResult.evidence.map(item => item.reference)).toContain(evidence.reference);
+    expect(withResult.evidence[0].source).toBe('独立测试报告');
+  });
+
+  it('后续目标契约变更不会改写已确认建议的规则快照', () => {
+    const weekStart = currentWeekStart();
+    const goalPlanId = createGoalPlan('E2', '完整基准测试响应延迟低于 200 ms');
+    scheduleGoal(weekStart);
+    const draft = getWeeklyReview(weekStart, 'UTC');
+    saveWeeklyReview(weekStart, draft.review.adjustment, 'UTC');
+    const confirmed = confirmWeeklyReviewAdjustment(weekStart, 'UTC');
+    const actionId = confirmed.followup?.actionId;
+    expect(actionId).toBeTruthy();
+    if (!actionId) throw new Error('expected confirmed follow-up action');
+
+    const currentGoal = listGoalPlans().find(goal => goal.id === goalPlanId)!;
+    const change = createGoalPlanContractChange(goalPlanId, {
+      summary: '收紧响应延迟标准并提高证据门槛',
+      plan: {
+        successDescription: '完整基准测试响应延迟低于 100 ms。',
+        milestones: currentGoal.milestones.map(milestone => ({
+          ...milestone, successCriteria: '完整基准测试响应延迟低于 100 ms', evidenceRequirement: '完整基准测试 E3 结果。',
+        })),
+        evidenceRequirements: currentGoal.evidenceRequirements.map(requirement => ({ ...requirement, minimumLevel: 'E3' as const })),
+      },
+    });
+    resolveGoalPlanContractChange(goalPlanId, change.id, { action: 'confirm', confirmed: true });
+    const database = openDatabase();
+    database.prepare('UPDATE goal_plan_contract_versions SET effective_at=? WHERE goal_plan_id=? AND version=2')
+      .run(`${nextWeekStart(weekStart)}T00:00:00.000Z`, goalPlanId);
+    database.close();
+
+    markGoalPlanActionDone(actionId);
+    saveEvidence({
+      text: '完整复测测得延迟 150 ms', source: '复测报告', reference: 'followup-under-original-contract',
+      observedAt: new Date().toISOString(), links: ['milestone'], level: 'E2',
+      reportSubmitted: null, latencyMs: 150, benchmarkComplete: true, goalPlanId, goalActionId: actionId,
+    });
+    const trace = getWeeklyReview(nextWeekStart(weekStart), 'UTC').review.followups[0];
+    expect(trace).toMatchObject({
+      status: 'result_available', outcome: 'met', contractVersion: 1,
+      milestoneCriteria: '完整基准测试响应延迟低于 200 ms', requiredEvidenceLevel: 'E2',
+    });
   });
 
   it('按本地时区周边界筛选证据', () => {

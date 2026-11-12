@@ -537,6 +537,7 @@ function ensureSchema() {
       milestone_id TEXT,
       parent_action_id TEXT,
       decomposed_at TEXT,
+      source_review_week_start TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS task_decomposition_proposals (
@@ -651,6 +652,9 @@ function ensureSchema() {
   const existingColumns = new Set(actionColumns.map(column => column.name));
   if (!existingColumns.has('parent_action_id')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN parent_action_id TEXT');
   if (!existingColumns.has('decomposed_at')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN decomposed_at TEXT');
+  if (!existingColumns.has('source_review_week_start')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN source_review_week_start TEXT');
+  database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS one_action_per_weekly_review
+    ON goal_plan_actions(source_review_week_start) WHERE source_review_week_start IS NOT NULL`);
   if (!existingColumns.has('completed_at')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN completed_at TEXT');
   if (!existingColumns.has('project_name')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN project_name TEXT');
   if (!existingColumns.has('project_id')) database.exec('ALTER TABLE goal_plan_actions ADD COLUMN project_id TEXT REFERENCES goal_projects(id)');
@@ -1833,9 +1837,25 @@ function actionFieldChanges(previous: GoalPlanActionInput | null, next: GoalPlan
 }
 
 export function createGoalPlanAction(input: unknown): GoalPlanAction {
+  return createGoalPlanActionInternal(input, null);
+}
+
+export function createGoalPlanActionForWeeklyReview(input: unknown, reviewWeekStart: string): GoalPlanAction {
+  if (typeof reviewWeekStart !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(reviewWeekStart)) throw new Error('周复盘起始日期无效');
+  const parsed = new Date(`${reviewWeekStart}T00:00:00.000Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== reviewWeekStart || parsed.getUTCDay() !== 1) {
+    throw new Error('周复盘起始日期必须是星期一');
+  }
+  return createGoalPlanActionInternal(input, reviewWeekStart);
+}
+
+function createGoalPlanActionInternal(input: unknown, reviewWeekStart: string | null): GoalPlanAction {
   const value = object(input, '任务');
   const goalPlanId = typeof value.goalPlanId === 'string' ? value.goalPlanId : '';
   const action = normalizeGoalPlanActionInput(value);
+  const milestoneId = value.milestoneId === undefined || value.milestoneId === null || value.milestoneId === ''
+    ? null
+    : nullableText(value.milestoneId, '里程碑 ID', 100);
   const database = ensureSchema();
   let inTransaction = false;
   const id = randomUUID();
@@ -1843,26 +1863,43 @@ export function createGoalPlanAction(input: unknown): GoalPlanAction {
   try {
     database.exec('BEGIN IMMEDIATE');
     inTransaction = true;
+    if (reviewWeekStart) {
+      const existing = database.prepare(`${actionSelect} WHERE a.source_review_week_start=?`).get(reviewWeekStart) as Record<string, unknown> | undefined;
+      if (existing) {
+        if (String(existing.goal_plan_id) !== goalPlanId) throw new Error('该周复盘已关联到其他目标任务');
+        database.exec('COMMIT');
+        inTransaction = false;
+        return actionFromRow(existing);
+      }
+    }
     const goalPlan = ensureActiveGoalPlan(database, goalPlanId);
+    const planRow = database.prepare('SELECT plan_json FROM goal_plans WHERE id=?').get(goalPlan.id) as { plan_json: string };
+    if (milestoneId && !normalizeDraft(JSON.parse(planRow.plan_json)).milestones.some(milestone => milestone.id === milestoneId)) {
+      throw new Error('所选里程碑不属于该目标');
+    }
     validateActionDependencies(database, goalPlan.id, id, action.dependencyIds);
     const project = action.projectId ? requireGoalProject(database, action.projectId) : null;
     if (project) associateGoalProject(database, project.id, goalPlan.id, now);
     database.prepare(`INSERT INTO goal_plan_actions
-      (id,goal_plan_id,title,details,project_id,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?)`)
+      (id,goal_plan_id,title,details,project_id,project_name,deadline,estimate_minutes,dependency_ids,success_criteria,evidence_requirement,
+       milestone_id,source_review_week_start,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending_schedule',?,?)`)
       .run(id, goalPlan.id, action.title, action.details, action.projectId, project?.title ?? action.projectName, action.deadline, action.estimateMinutes,
-        JSON.stringify(action.dependencyIds), action.successCriteria, action.evidenceRequirement, now, now);
+        JSON.stringify(action.dependencyIds), action.successCriteria, action.evidenceRequirement, milestoneId, reviewWeekStart, now, now);
     const fieldChanges = actionFieldChanges(null, action);
-    recordTaskChange(database, 'task.created', { id, goalPlanId: goalPlan.id, title: action.title, projectName: project?.title ?? action.projectName }, fieldChanges.map(change => change.field), now, fieldChanges);
+    recordTaskChange(database, 'task.created', {
+      id, goalPlanId: goalPlan.id, title: action.title, projectName: project?.title ?? action.projectName,
+    }, [...fieldChanges.map(change => change.field), ...(milestoneId ? ['milestoneId'] : [])], now, fieldChanges);
     database.exec('COMMIT');
     inTransaction = false;
+    const created = database.prepare(`${actionSelect} WHERE a.id=?`).get(id) as Record<string, unknown>;
+    return actionFromRow(created);
   } catch (error) {
     if (inTransaction) database.exec('ROLLBACK');
     throw error;
   } finally {
     database.close();
   }
-  return listGoalPlanActions(goalPlanId).find(action => action.id === id)!;
 }
 
 export function updateGoalPlanAction(id: string, input: unknown): GoalPlanAction {
