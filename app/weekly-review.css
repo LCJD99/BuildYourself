@@ -25,6 +25,17 @@
 .weekly-review-columns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
 .weekly-review-columns section,.weekly-review-gaps,.weekly-review-adjustment{padding:14px;border:1px solid #e8ede6;border-radius:8px;background:#fff}
 .weekly-review-columns h3,.weekly-review-gaps h3,.weekly-review-adjustment h3{margin:0;color:#607362;font-size:11px;font-weight:600}
+.weekly-review-goals{display:grid;gap:9px;margin-top:12px;padding:14px;border:1px solid #e8ede6;border-radius:8px;background:#fff}
+.weekly-review-goals>h3{margin:0;color:#607362;font-size:11px;font-weight:600}
+.weekly-review-goals>p{margin:0;color:#929e93;font-size:10px;line-height:1.6}
+.weekly-review-goal{padding:11px;border:1px solid #eef1eb;border-radius:7px;background:#fcfdfb}
+.weekly-review-goal>div{display:flex;justify-content:space-between;gap:8px;color:#526555;font-size:10px}
+.weekly-review-goal>div span{color:#879487}
+.weekly-review-goal>p{margin:7px 0;color:#849184;font-size:9px;line-height:1.6}
+.weekly-review-goal ul{margin:6px 0 0;padding:0;list-style:none}
+.weekly-review-goal li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:8px 0;border-top:1px solid #eef1eb;color:#627565;font-size:9px}
+.weekly-review-goal li span{color:#829083;text-align:right}
+.weekly-review-goal li small{grid-column:1/-1;color:#909b90;font-size:9px;line-height:1.5}
 .weekly-review-columns ul,.weekly-review-gaps ul{margin:9px 0 0;padding-left:17px;color:#7f8d81;font-size:10px;line-height:1.7}
 .weekly-review-gaps{margin-top:10px}
 .weekly-review-gaps p{margin:7px 0 0;color:#929e93;font-size:10px;line-height:1.6}
