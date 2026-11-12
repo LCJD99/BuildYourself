@@ -753,7 +753,7 @@ export default function GoalPlansPanel({ focusActionId, selectedProjectId }: { f
                   <div className="goal-task-card-head">
                     <div><span className={`goal-task-status ${action.decomposedAt ? 'decomposed' : action.status}`}>{action.decomposedAt ? '已拆分' : action.status === 'pending_schedule' ? '待排' : action.status === 'scheduled' ? '已安排' : '已完成'}</span><strong>{action.title}</strong></div>
                     <div className="goal-task-actions">
-                      {action.status !== 'done' && <button type="button" className="edit-evidence-button" disabled={busyId === action.id} onClick={() => void markTaskDone(action)}>{busyId === action.id ? '记录中…' : '记录完成'}</button>}
+                      {action.status !== 'done' && !action.decomposedAt && <button type="button" className="edit-evidence-button" disabled={busyId === action.id} onClick={() => void markTaskDone(action)}>{busyId === action.id ? '记录中…' : '记录完成'}</button>}
                       <button type="button" className="edit-evidence-button" disabled={!!action.decomposedAt} onClick={() => beginTaskEdit(action)}>{action.decomposedAt ? '已拆分' : '编辑'}</button>
                     </div>
                   </div>

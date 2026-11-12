@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, saveEvidence } from '../lib/store';
 import { confirmDailyPlan, generateAndSaveDailyPlan, getDailyPlan } from '../lib/daily-plan-store';
-import { activateGoalPlan, listGoalPlanActions, markGoalPlanActionDone, saveGoalPlanDraft, transitionGoalPlan, updateGoalPlanAction } from '../lib/goal-plans';
+import { activateGoalPlan, createGoalProject, createTaskDecompositionProposal, linkGoalProjectEvidence, linkGoalProjectToGoal, listGoalPlanActions, listGoalProjects, markGoalPlanActionDone, resolveTaskDecompositionProposal, saveGoalPlanDraft, transitionGoalPlan, updateGoalPlanAction } from '../lib/goal-plans';
 import { getHistoryCalendar } from '../lib/history-calendar';
 import { filterHistoryDay, selectHistoryDay } from '../lib/history-calendar-view';
 import { correctEvidence } from '../lib/milestone-store';
@@ -93,6 +93,20 @@ describe('只读历史日历', () => {
     expect(edited.completedAt).toBe(completed.completedAt);
     const expectedDate = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(completed.completedAt!));
     expect(getHistoryCalendar().days[0].date).toBe(expectedDate);
+  });
+
+  it('任务拆分后拒绝把已替代父任务记成完成历史', () => {
+    const draft = saveGoalPlanDraft(completePlan());
+    activateGoalPlan(draft.id);
+    const [parent] = listGoalPlanActions(draft.id);
+    const proposal = createTaskDecompositionProposal(parent.id, { tasks: [
+      { id: 'prepare', title: '准备材料', estimateMinutes: 30, successCriteria: '材料齐全', dependencyIds: [] },
+      { id: 'review', title: '复核材料', estimateMinutes: 30, successCriteria: '复核完成', dependencyIds: ['prepare'] },
+    ] });
+    resolveTaskDecompositionProposal(proposal.id, { action: 'confirm' });
+
+    expect(() => markGoalPlanActionDone(parent.id)).toThrow('已拆分');
+    expect(getHistoryCalendar().days.flatMap(day => day.activities)).not.toContainEqual(expect.objectContaining({ id: parent.id }));
   });
 
   it('保留旧的无日期完成记录并明确标记日期不详', () => {
@@ -240,6 +254,37 @@ describe('只读历史日历', () => {
     expect(selectHistoryDay(history, '2026-11-05', secondGoal.id)?.evidence).toEqual([
       expect.objectContaining({ id: evidence.id, goalActionId: secondAction.id, observedAt: '2026-11-06T01:00:00.000Z' }),
     ]);
+  });
+
+  it('更正行动证据归属后保留共享项目的证据链接', () => {
+    const firstGoal = saveGoalPlanDraft(completePlan('项目目标一'));
+    const secondGoal = saveGoalPlanDraft(completePlan('项目目标二'));
+    activateGoalPlan(firstGoal.id);
+    activateGoalPlan(secondGoal.id);
+    const firstAction = listGoalPlanActions(firstGoal.id)[0];
+    const secondAction = listGoalPlanActions(secondGoal.id)[0];
+    const project = createGoalProject({ title: '跨目标共享项目', goalPlanId: firstGoal.id });
+    linkGoalProjectToGoal(project.id, { goalPlanId: secondGoal.id });
+    const evidence = saveEvidence({
+      text: '完成验收记录', source: '用户', reference: 'acceptance-1', observedAt: '2026-11-04T01:00:00.000Z',
+      links: ['task'], goalPlanId: firstGoal.id, goalActionId: firstAction.id,
+      level: 'E2', reportSubmitted: true, benchmarkComplete: null, latencyMs: null,
+    });
+    linkGoalProjectEvidence(project.id, evidence.id);
+
+    correctEvidence(evidence.id, {
+      ...evidence, text: '补充后的验收记录', observedAt: '2026-11-06T01:00:00.000Z',
+      goalPlanId: secondGoal.id, goalActionId: secondAction.id,
+    });
+
+    const linkedEvidence = listGoalProjects().find(item => item.id === project.id)?.evidence;
+    expect(linkedEvidence).toContainEqual(expect.objectContaining({
+      id: evidence.id, goalPlanId: secondGoal.id, goalActionId: secondAction.id, text: '补充后的验收记录',
+    }));
+    const history = getHistoryCalendar('America/Los_Angeles');
+    expect(history.days.find(day => day.date === '2026-11-05')?.evidence).toContainEqual(expect.objectContaining({
+      id: evidence.id, goalPlanId: secondGoal.id, goalActionId: secondAction.id,
+    }));
   });
 
   it('已确认周计划仍是安排记录，只有显式完成记录才进入历史', () => {

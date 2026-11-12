@@ -1298,6 +1298,7 @@ export function markGoalPlanActionDone(id: string): GoalPlanAction {
     inTransaction = true;
     const row = database.prepare(`${actionSelect} WHERE a.id=? AND p.status='active'`).get(id) as Record<string, unknown> | undefined;
     if (!row) throw new Error('只能记录活跃目标中的行动');
+    if (row.decomposed_at) throw new Error('已拆分的父任务不能标记为完成');
     if (row.status === 'done') {
       database.exec('COMMIT');
       inTransaction = false;
