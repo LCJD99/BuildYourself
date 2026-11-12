@@ -114,13 +114,29 @@ export function calculateReplanDeadlineGaps(plan: WeeklyPlan): ReplanDeadlineGap
   const hardDeadlineItems = unplaced.filter(entry => Boolean(entry.action.hardDeadline));
   const deadlines = [...new Set(hardDeadlineItems.map(entry => entry.action.hardDeadline!))].sort();
   const freeMinutes = new Map(plan.days.map(day => [day.date, Math.max(0, day.capacityMinutes - day.usedMinutes)]));
+  const unplacedActionIds = new Set(unplaced.map(entry => entry.action.id));
   const eligibleDates = (action: PlannerAction): string[] | null => {
-    const dependencyDates = action.dependsOn.map(id => placedDates.get(id));
+    const relationRules = action.relationRules ?? [];
+    const prerequisiteIds = relationRules.filter(rule => rule.type === 'prerequisite' || rule.type === 'recovery_conflict')
+      .map(rule => rule.otherActionId);
+    const dependencyDates = [...new Set([...action.dependsOn, ...prerequisiteIds])].map(id => placedDates.get(id));
     if (dependencyDates.some(date => date === undefined)) return null;
     const latestDependency = dependencyDates.filter((date): date is string => date !== undefined).sort().at(-1);
-    const earliestDate = latestDependency ? nextDate(latestDependency) : plan.weekStart;
+    let earliestDate = latestDependency ? nextDate(latestDependency) : plan.weekStart;
+    const blockedDates = new Set<string>();
+    for (const rule of relationRules) {
+      const relatedDate = placedDates.get(rule.otherActionId);
+      if (rule.type === 'time_conflict') {
+        if (!relatedDate) return null;
+        blockedDates.add(relatedDate);
+      } else if (rule.type === 'recovery_conflict') {
+        if (!relatedDate || rule.minimumRestDays === null) return null;
+        earliestDate = [earliestDate, dateAfter(relatedDate, rule.minimumRestDays + 1)].sort().at(-1)!;
+      }
+    }
     return plan.days.filter(day => day.date >= earliestDate
       && day.date <= action.hardDeadline!
+      && !blockedDates.has(day.date)
       && !plan.recoveryConstraints?.some(constraint => constraint.goalPlanId === action.goalPlanId && constraint.date === day.date))
       .map(day => day.date);
   };
@@ -136,6 +152,10 @@ export function calculateReplanDeadlineGaps(plan: WeeklyPlan): ReplanDeadlineGap
     }));
     const windows = entries.map(entry => eligibleDates(entry.action));
     const hasUnknownWindow = windows.some(window => window === null);
+    const hasUnknownRelationWindow = entries.some(entry => (entry.action.relationRules ?? []).some(rule =>
+      (rule.type === 'time_conflict' || rule.type === 'recovery_conflict' || rule.type === 'prerequisite')
+      && !placedDates.has(rule.otherActionId)
+      && unplacedActionIds.has(rule.otherActionId)));
     const usableDates = new Set(windows.flatMap(window => window ?? []));
     const availableCapacityMinutes = hasUnknownWindow ? null : [...usableDates].reduce((sum, date) => sum + (freeMinutes.get(date) ?? 0), 0);
     const maxSingleDayCapacityMinutes = hasUnknownWindow ? null : Math.max(0, ...[...usableDates].map(date => freeMinutes.get(date) ?? 0));
@@ -160,9 +180,13 @@ export function calculateReplanDeadlineGaps(plan: WeeklyPlan): ReplanDeadlineGap
       : calculation === 'estimate'
         ? '按默认行动时长或每日容量估算；按合法日期中最大单日剩余容量计算，假设已排安排保持不变。'
       : hasUnknownWindow
-        ? '至少一项行动的依赖尚未排入，无法确定其可用日期，因此不计算精确容量缺口。'
+        ? hasUnknownRelationWindow
+          ? '至少一条跨目标关系关联行动尚未排入，无法确定其可用日期，因此不计算精确容量缺口。'
+          : '至少一项行动的依赖或关系关联行动尚未排入，无法确定其可用日期，因此不计算精确容量缺口。'
         : !onlyWindow?.length && entries.length === 1
-          ? '硬截止、依赖或恢复约束下没有合法可安排日期；需先调整约束，无法给出有限的新增容量缺口。'
+          ? entries[0].action.relationRules?.length
+            ? '硬截止、依赖、恢复或跨目标关系约束下没有合法可安排日期；需先调整约束，无法给出有限的新增容量缺口。'
+            : '硬截止、依赖或恢复约束下没有合法可安排日期；需先调整约束，无法给出有限的新增容量缺口。'
           : '多项未排硬截止行动可能竞争同一容量，或有更早截止事项尚未排入；不把未排工作量误当作精确容量缺口。';
     return {
       deadline,

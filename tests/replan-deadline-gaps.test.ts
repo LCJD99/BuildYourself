@@ -98,4 +98,81 @@ describe('重排硬截止容量影响', () => {
     }))[0];
     expect(noRecoveryDate).toMatchObject({ availableCapacityMinutes: 0, requiredAdditionalCapacityMinutes: null, calculation: 'unknown' });
   });
+
+  it('跨目标同日冲突排除已安排关联行动的日期后再计算容量缺口', () => {
+    const gap = calculateReplanDeadlineGaps(plan({
+      freeMinutes: { '2026-11-09': 40, '2026-11-10': 20 },
+      placed: [{ actionId: 'goal-a-action', date: '2026-11-09', minutes: 60 }],
+      unplaced: [action({
+        id: 'goal-b-action', goalPlanId: 'goal-b', goalTitle: '目标 B',
+        hardDeadline: '2026-11-10', estimateMinutes: 60,
+        relationRules: [{
+          relationId: 'relation-time', relationVersion: 1, type: 'time_conflict',
+          otherActionId: 'goal-a-action', otherActionTitle: '关联行动', otherGoalTitle: '目标 A', minimumRestDays: null,
+        }],
+      })],
+    }))[0];
+
+    expect(gap).toMatchObject({
+      availableCapacityMinutes: 20, maxSingleDayCapacityMinutes: 20,
+      requiredAdditionalCapacityMinutes: 40, calculation: 'exact',
+    });
+  });
+
+  it('时间冲突的另一行动尚未排入时不声称已知合法容量窗口', () => {
+    const gap = calculateReplanDeadlineGaps(plan({
+      freeMinutes: { '2026-11-09': 100, '2026-11-10': 100 },
+      unplaced: [action({
+        id: 'goal-b-action', goalPlanId: 'goal-b', goalTitle: '目标 B',
+        hardDeadline: '2026-11-10', estimateMinutes: 60,
+        relationRules: [{
+          relationId: 'relation-time', relationVersion: 1, type: 'time_conflict',
+          otherActionId: 'goal-a-action', otherActionTitle: '关联行动', otherGoalTitle: '目标 A', minimumRestDays: null,
+        }],
+      }), action({ id: 'goal-a-action', hardDeadline: null })],
+    }))[0];
+
+    expect(gap).toMatchObject({
+      availableCapacityMinutes: null, maxSingleDayCapacityMinutes: null,
+      requiredAdditionalCapacityMinutes: null, calculation: 'unknown',
+    });
+    expect(gap.calculationNote).toContain('跨目标关系关联行动尚未排入');
+  });
+
+  it('恢复关系限制合法日期，并在截止前没有合法日期时标记缺口不可确定', () => {
+    const gap = calculateReplanDeadlineGaps(plan({
+      freeMinutes: { '2026-11-09': 100, '2026-11-10': 100, '2026-11-11': 30, '2026-11-12': 50 },
+      placed: [{ actionId: 'goal-a-action', date: '2026-11-09', minutes: 60 }],
+      unplaced: [action({
+        id: 'goal-b-action', goalPlanId: 'goal-b', goalTitle: '目标 B',
+        hardDeadline: '2026-11-12', estimateMinutes: 60,
+        relationRules: [{
+          relationId: 'relation-rest', relationVersion: 1, type: 'recovery_conflict',
+          otherActionId: 'goal-a-action', otherActionTitle: '关联行动', otherGoalTitle: '目标 A', minimumRestDays: 1,
+        }],
+      })],
+    }))[0];
+    expect(gap).toMatchObject({
+      availableCapacityMinutes: 80, maxSingleDayCapacityMinutes: 50,
+      requiredAdditionalCapacityMinutes: 10, calculation: 'exact',
+    });
+
+    const noLegalDate = calculateReplanDeadlineGaps(plan({
+      freeMinutes: { '2026-11-09': 100, '2026-11-10': 100 },
+      placed: [{ actionId: 'goal-a-action', date: '2026-11-09', minutes: 60 }],
+      unplaced: [action({
+        id: 'goal-b-action', goalPlanId: 'goal-b', goalTitle: '目标 B',
+        hardDeadline: '2026-11-10', estimateMinutes: 60,
+        relationRules: [{
+          relationId: 'relation-rest', relationVersion: 1, type: 'recovery_conflict',
+          otherActionId: 'goal-a-action', otherActionTitle: '关联行动', otherGoalTitle: '目标 A', minimumRestDays: 1,
+        }],
+      })],
+    }))[0];
+    expect(noLegalDate).toMatchObject({
+      availableCapacityMinutes: 0, maxSingleDayCapacityMinutes: 0,
+      requiredAdditionalCapacityMinutes: null, calculation: 'unknown',
+    });
+    expect(noLegalDate.calculationNote).toContain('关系约束');
+  });
 });
