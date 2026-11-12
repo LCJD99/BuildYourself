@@ -776,6 +776,34 @@ export function resolveTaskDecompositionProposal(id: unknown, input: unknown): T
         projectName: task.projectName ?? (parent.project_name === null ? null : String(parent.project_name)),
       }, ['任务名称', '预计耗时', '截止日期', '依赖', '完成标准'], updatedAt, []);
     }
+    const taskIdsUsedAsPrerequisites = new Set(tasks.flatMap(task => task.dependencyIds));
+    const terminalTaskIds = tasks
+      .filter(task => !taskIdsUsedAsPrerequisites.has(task.id))
+      .map(task => taskIds.get(task.id)!)
+      .sort();
+    const dependents = database.prepare(`SELECT id, title, project_name, dependency_ids FROM goal_plan_actions
+      WHERE goal_plan_id=? AND id<>? AND status='pending_schedule'`).all(proposal.goalPlanId, proposal.parentActionId) as Array<{
+        id: string; title: string; project_name: string | null; dependency_ids: string;
+      }>;
+    const updateDependencies = database.prepare('UPDATE goal_plan_actions SET dependency_ids=?, updated_at=? WHERE id=?');
+    for (const dependent of dependents) {
+      let previousDependencies: string[] = [];
+      try {
+        const parsed: unknown = JSON.parse(dependent.dependency_ids);
+        if (Array.isArray(parsed)) previousDependencies = parsed.filter((dependency): dependency is string => typeof dependency === 'string');
+      } catch {
+        throw new Error(`任务「${dependent.title}」的依赖数据无效，不能确认拆分`);
+      }
+      if (!previousDependencies.includes(proposal.parentActionId)) continue;
+      const nextDependencies = [...new Set(previousDependencies.flatMap(dependency =>
+        dependency === proposal.parentActionId ? terminalTaskIds : [dependency]))].sort();
+      updateDependencies.run(JSON.stringify(nextDependencies), updatedAt, dependent.id);
+      recordTaskChange(database, 'task.updated', {
+        id: dependent.id, goalPlanId: proposal.goalPlanId, title: dependent.title,
+        projectName: dependent.project_name,
+      }, ['依赖'], updatedAt, [{ field: '依赖', before: previousDependencies, after: nextDependencies }]);
+    }
+    assertActionDependencyGraph(readActionDependencyGraph(database, proposal.goalPlanId));
     database.prepare('UPDATE goal_plan_actions SET decomposed_at=?, updated_at=? WHERE id=?').run(updatedAt, updatedAt, proposal.parentActionId);
     recordTaskChange(database, 'task.updated', {
       id: proposal.parentActionId, goalPlanId: proposal.goalPlanId, title: String(parent.title),
@@ -793,9 +821,9 @@ export function resolveTaskDecompositionProposal(id: unknown, input: unknown): T
   }
 }
 
-function validateActionDependencies(database: DatabaseSync, goalPlanId: string, taskId: string, dependencyIds: string[]) {
+function readActionDependencyGraph(database: DatabaseSync, goalPlanId: string) {
   const rows = database.prepare('SELECT id, dependency_ids FROM goal_plan_actions WHERE goal_plan_id=?').all(goalPlanId) as Array<{ id: string; dependency_ids: string }>;
-  const graph = new Map(rows.map(row => {
+  return new Map(rows.map(row => {
     let dependencies: string[] = [];
     try {
       const parsed: unknown = JSON.parse(row.dependency_ids);
@@ -805,11 +833,15 @@ function validateActionDependencies(database: DatabaseSync, goalPlanId: string, 
     }
     return [row.id, dependencies] as const;
   }));
+}
+
+function assertActionDependencyGraph(graph: Map<string, string[]>) {
   const validTaskIds = new Set(graph.keys());
-  if (dependencyIds.some(id => id === taskId || !validTaskIds.has(id))) {
-    throw new Error('依赖必须指向同一活跃目标下的其他任务');
+  for (const [taskId, dependencyIds] of graph) {
+    if (dependencyIds.some(id => id === taskId || !validTaskIds.has(id))) {
+      throw new Error('依赖必须指向同一活跃目标下的其他任务');
+    }
   }
-  graph.set(taskId, dependencyIds);
   const visited = new Set<string>();
   const activePath = new Set<string>();
   const hasCycle = (id: string): boolean => {
@@ -822,6 +854,16 @@ function validateActionDependencies(database: DatabaseSync, goalPlanId: string, 
     return false;
   };
   if ([...graph.keys()].some(hasCycle)) throw new Error('任务依赖不能形成循环');
+}
+
+function validateActionDependencies(database: DatabaseSync, goalPlanId: string, taskId: string, dependencyIds: string[]) {
+  const graph = readActionDependencyGraph(database, goalPlanId);
+  const validTaskIds = new Set(graph.keys());
+  if (dependencyIds.some(id => id === taskId || !validTaskIds.has(id))) {
+    throw new Error('依赖必须指向同一活跃目标下的其他任务');
+  }
+  graph.set(taskId, dependencyIds);
+  assertActionDependencyGraph(graph);
 }
 
 const actionFieldLabels: Array<[keyof GoalPlanActionInput, string]> = [
