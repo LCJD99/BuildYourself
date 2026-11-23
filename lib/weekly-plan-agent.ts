@@ -43,7 +43,7 @@ function invokePi(prompt: string): Promise<string> {
   });
 }
 
-function parseResult(stdout: string): WeeklyPlanAgentResult {
+function parseResult(stdout: string, existingActionIds: Set<string>): WeeklyPlanAgentResult {
   let text = stdout.trim();
   const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   if (fenced) text = fenced[1];
@@ -58,14 +58,23 @@ function parseResult(stdout: string): WeeklyPlanAgentResult {
   const actions = result.actions.map((value, index) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new GoalDraftError(`第 ${index + 1} 个行动格式无效。`, 502);
     const action = value as Record<string, unknown>;
-    if (Object.keys(action).some(key => !['operation', 'id', 'actionId', 'title', 'description', 'date', 'goalIds', 'attributeIds'].includes(key))) {
+    if (Object.keys(action).some(key => !['operation', 'id', 'title', 'description', 'date', 'goalIds', 'attributeIds'].includes(key))) {
       throw new GoalDraftError(`第 ${index + 1} 个行动含无法识别的字段。`, 502);
     }
     if (action.operation !== 'add' && action.operation !== 'update') throw new GoalDraftError(`第 ${index + 1} 个行动缺少明确的新增或修改操作。`, 502);
     const operation = action.operation as 'add' | 'update';
-    const proposedId = action.id ?? action.actionId;
+    const proposedId = action.id;
     const id = typeof proposedId === 'string' && proposedId.trim() ? proposedId.trim() : undefined;
-    if (operation === 'update' && !id) throw new GoalDraftError(`第 ${index + 1} 个修改行动必须提供有效的旧行动 ID。`, 502);
+    if (operation === 'update' && (!id || !existingActionIds.has(id))) {
+      throw new GoalDraftError(`第 ${index + 1} 个修改行动必须提供当前规划中的有效旧行动 ID。`, 502);
+    }
+    if (operation === 'add' && proposedId !== undefined && proposedId !== null
+      && typeof proposedId !== 'string') {
+      throw new GoalDraftError(`第 ${index + 1} 个新增行动 ID 必须省略或是临时文本 ID。`, 502);
+    }
+    if (operation === 'add' && id && existingActionIds.has(id)) {
+      throw new GoalDraftError(`第 ${index + 1} 个新增行动不能复用现有行动 ID。`, 502);
+    }
     if (typeof action.title !== 'string' || !action.title.trim()
       || (action.description !== undefined && typeof action.description !== 'string')
       || typeof action.date !== 'string'
@@ -101,7 +110,7 @@ export async function proposeWeeklyPlan(input: {
     focusGoalId: input.focusGoalId ?? null,
     currentPlan: input.currentPlan,
     userMessage: input.message ?? null,
-  })));
+  })), new Set(input.currentPlan?.actions.map(action => action.id) ?? []));
   if (!input.currentPlan && result.actions.length === 0) throw new GoalDraftError('PI Agent 没有为本周生成任何行动。', 502);
   // New actions receive their stable IDs in the persistence layer; the provider never owns identity.
   return result;

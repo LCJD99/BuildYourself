@@ -253,10 +253,15 @@ export async function generateWeeklyPlanForGoal(goalId: string, weekStart = curr
 
   try {
     const proposal = await proposeWeeklyPlan({ weekStart, goals, currentPlan: start.baselineRevision ? { actions: start.current } : null, focusGoalId: goalId });
-    if (!proposal.actions.some(action => action.goalIds.includes(goalId))) {
-      throw new GoalDraftError('Agent 没有为新启用目标生成关联行动。', 502);
-    }
     const actions = validateActions({ actions: proposal.actions, goals, weekStart, previous: start.current });
+    const uncoveredGoals = goals.filter(goal => !actions.some(action => action.goalIds.includes(goal.id)
+      && action.attributeIds.some(attributeId => goal.attributes.some(attribute => attribute.id === attributeId))));
+    if (uncoveredGoals.length) {
+      const focusMissing = uncoveredGoals.some(goal => goal.id === goalId);
+      throw new GoalDraftError(focusMissing
+        ? 'Agent 没有为新启用目标及其属性生成关联行动。'
+        : 'Agent 没有为每个已启用目标及其属性生成关联行动。', 502);
+    }
     if (JSON.stringify(goalSnapshot(listEnabledGoals())) !== JSON.stringify(goalSnapshot(goals))) {
       throw new GoalDraftError('已启用目标发生变化，请基于最新目标重新生成规划。', 409);
     }

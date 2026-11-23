@@ -229,14 +229,18 @@ describe('v0.2 首周规划 HTTP API', () => {
     }), params(firstPlan.id));
     expect(initialConfirmation.status).toBe(200);
 
-    proposeWeeklyPlan.mockResolvedValueOnce({ reply: '保留旧安排。', actions: [{
-      operation: 'update', id: firstPlan.actions[0].id, ...firstPlan.actions[0], goalIds: [firstGoal.id],
-    }] });
+    proposeWeeklyPlan.mockImplementationOnce(async ({ goals }: { goals: Array<{ id: string }> }) => {
+      const addedGoal = goals.find(goal => goal.id !== firstGoal.id)!;
+      return { reply: '将旧行动关联新目标。', actions: [{
+        ...firstPlan.actions[0], operation: 'update' as const, id: firstPlan.actions[0].id,
+        goalIds: [firstGoal.id, addedGoal.id], attributeIds: [firstGoal.attributes[0].id],
+      }] };
+    });
     const secondEnabled = await enableGoal();
     const secondResult = await secondEnabled.json();
     const secondGoal = secondResult.goal;
     expect(secondResult.weeklyPlanGeneration.status).toBe('failed');
-    expect(secondResult.weeklyPlanGeneration.error).toContain('新启用目标');
+    expect(secondResult.weeklyPlanGeneration.error).toContain('新启用目标及其属性');
     const beforeRetry = await getWeeklyPlan(new Request('http://localhost'), params(firstPlan.id));
     expect((await beforeRetry.json()).activePlan.revision).toBe(1);
 
@@ -260,6 +264,47 @@ describe('v0.2 首周规划 HTTP API', () => {
     expect(retried.plan.actions.map((action: { id: string }) => action.id)).toContain(firstPlan.actions[0].id);
     expect(retried.plan.actions.some((action: { goalIds: string[] }) => action.goalIds.includes(secondGoal.id))).toBe(true);
     expect(retried.generation.goalId).toBe(secondGoal.id);
+  });
+
+  it('新生成规划必须覆盖所有已启用目标，漏掉先前失败目标时失败且可重试', async () => {
+    proposeWeeklyPlan.mockRejectedValueOnce(new Error('首次规划服务不可用'));
+    const firstEnabled = await enableGoal();
+    const firstResult = await firstEnabled.json();
+    const firstGoal = firstResult.goal;
+    expect(firstResult.weeklyPlanGeneration.status).toBe('failed');
+
+    proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
+      goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
+    }) => {
+      const onlyNewGoal = goals.find(goal => goal.id !== firstGoal.id)!;
+      return { reply: '只为新目标安排行动。', actions: [{
+        operation: 'add' as const, title: '新增目标专项练习', description: '练习新目标内容。', date: weekStart,
+        goalIds: [onlyNewGoal.id], attributeIds: [onlyNewGoal.attributes[0].id],
+      }] };
+    });
+    const secondEnabled = await enableGoal();
+    const secondResult = await secondEnabled.json();
+    const secondGoal = secondResult.goal;
+    expect(secondResult.weeklyPlanGeneration.status).toBe('failed');
+    expect(secondResult.weeklyPlanGeneration.error).toContain('每个已启用目标');
+
+    proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
+      goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
+    }) => ({ reply: '已补齐所有目标的首周行动。', actions: goals.map(goal => ({
+      operation: 'add' as const, title: `推进：${goal.id}`, description: '首周目标行动。', date: weekStart,
+      goalIds: [goal.id], attributeIds: [goal.attributes[0].id],
+    })) }));
+    const retry = await retryGeneration(new Request(`http://localhost/api/v2/goals/${secondGoal.id}/weekly-plans`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weekStart: secondResult.weeklyPlanGeneration.weekStart }),
+    }), params(secondGoal.id));
+    const retried = await retry.json();
+
+    expect(retry.status).toBe(200);
+    expect(retried.generation.status).toBe('ready');
+    expect(retried.plan.actions).toHaveLength(2);
+    expect(retried.plan.actions.some((action: { goalIds: string[] }) => action.goalIds.includes(firstGoal.id))).toBe(true);
+    expect(retried.plan.actions.some((action: { goalIds: string[] }) => action.goalIds.includes(secondGoal.id))).toBe(true);
   });
 
   it('较早返回的 Agent 编辑结果不能覆盖较新的规划草稿', async () => {
