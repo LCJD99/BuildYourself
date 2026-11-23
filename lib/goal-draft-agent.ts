@@ -3,7 +3,7 @@ import { GoalDraftError, validateGoalDraftProposal, type GoalDraftProposal, type
 
 export type GoalDraftAgentResult = { reply: string; draft: GoalDraftProposal };
 
-const systemPrompt = `你是 BuildYourself 的长期目标澄清 Agent。用中文简洁追问，依据用户原话，不编造事实。仅输出 JSON，不要代码围栏。格式：{"reply":"给用户的简短回复","draft":{"title":"","description":"","constraints":{"status":"needs_clarification","items":[]},"attributes":[{"name":"","description":""}],"clarifyingQuestions":[""]}}。属性和问题最多各 4 项。未澄清完整时保留 needs_clarification；信息完整时才用 confirmed 并清空问题。不能替用户确认启用目标。`;
+const systemPrompt = `Return one concise JSON object only, no Markdown: {"reply":"中文回复","draft":{"title":"","description":"","constraints":{"status":"needs_clarification","items":[]},"attributes":[{"name":"","description":""}],"clarifyingQuestions":["中文问题"]}}. Reply in Chinese; use only user-provided facts; ask at most three questions. Mark constraints confirmed and clear questions only when enough details are known. Never activate a goal.`;
 
 function promptFor(input: {
   message: string;
@@ -28,7 +28,7 @@ function runPi(prompt: string): Promise<string> {
   args.push('--thinking', 'minimal', '--system-prompt', systemPrompt, '--', prompt);
 
   return new Promise((resolve, reject) => {
-    execFile(command, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+    const child = execFile(command, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
       if (error) {
         const childError = error as NodeJS.ErrnoException & { killed?: boolean };
         if (childError.code === 'ENOENT') {
@@ -42,6 +42,7 @@ function runPi(prompt: string): Promise<string> {
       }
       resolve(stdout);
     });
+    child.stdin?.end();
   });
 }
 

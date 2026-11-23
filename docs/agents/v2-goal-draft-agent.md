@@ -30,4 +30,12 @@
 
 PI 命令缺失、模型超时或返回无效内容时，业务 API 返回可诊断错误且不保存该轮草稿。模型必须只返回一个 JSON 对象；应用验证其字段后才持久化。PI 只收到保存的自然语言对话和草稿，不提供工具，也不会写入 PI 会话文件。浏览器提交的 `agentDraft` 字段不会被采纳。
 
-仓库现有 `pi/goal.js` 仍是调用 `/api/goal-plans` 的旧目标规划工具，不会直接编排 v0.2 草稿路由。v0.2 API 自己通过 PI CLI 调用已配置模型，并把每轮对话作为上下文传入；它不复用正在运行的 TUI 会话。目标确认响应中的 `weeklyPlanGeneration.status` 当前为 `not_implemented`；首周规划接入前不会生成。自动化 API 测试使用可控 PI 命令替身，真实 PI 配置下的多轮 HTTP 烟测应单独运行。
+仓库现有 `pi/goal.js` 仍是调用 `/api/goal-plans` 的旧目标规划工具，不会直接编排 v0.2 草稿路由。v0.2 API 自己通过 PI CLI 调用已配置模型，并把每轮对话作为上下文传入；它不复用正在运行的 TUI 会话。目标确认响应中的 `weeklyPlanGeneration.status` 当前为 `not_implemented`；首周规划接入前不会生成。Node 子进程调用 PI 时必须结束 stdin，否则 PI 的 `--print` 会等待输入结束。
+
+自动化测试默认用可控命令替身。需要验证真实 PI 多轮 HTTP 流程时，在已认证的 PI 环境运行：
+
+```sh
+RUN_PI_AGENT_SMOKE=1 BUILDYOURSELF_AGENT_MODEL=magpie/auto/auto npm test -- tests/goal-drafts-live-smoke.test.ts
+```
+
+该烟测通过初始草稿和后续消息两个 v2 路由调用真实 PI 模型；模型命令和模型名也可分别用 `BUILDYOURSELF_PI_BIN`、`BUILDYOURSELF_AGENT_MODEL` 替换。

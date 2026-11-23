@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { execFile } = vi.hoisted(() => ({ execFile: vi.fn() }));
+const { execFile, stdinEnd } = vi.hoisted(() => ({ execFile: vi.fn(), stdinEnd: vi.fn() }));
 vi.mock('node:child_process', () => ({ execFile }));
 
 import { proposeGoalDraft } from '../lib/goal-draft-agent';
@@ -15,13 +15,17 @@ const validOutput = JSON.stringify({
 });
 
 function provide(stdout: string, error?: NodeJS.ErrnoException) {
-  execFile.mockImplementation((_command, _args, _options, callback) => callback(error ?? null, stdout, ''));
+  execFile.mockImplementation((_command, _args, _options, callback) => {
+    callback(error ?? null, stdout, '');
+    return { stdin: { end: stdinEnd } };
+  });
 }
 
 beforeEach(() => {
   delete process.env.BUILDYOURSELF_PI_BIN;
   delete process.env.BUILDYOURSELF_AGENT_MODEL;
   execFile.mockReset();
+  stdinEnd.mockReset();
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -38,6 +42,7 @@ describe('v0.2 目标澄清 PI 适配器', () => {
     });
 
     expect(execFile).toHaveBeenCalledOnce();
+    expect(stdinEnd).toHaveBeenCalledOnce();
     const [command, args, options] = execFile.mock.calls[0];
     expect(command).toBe('/opt/homebrew/bin/pi');
     expect(args).toContain('--print');
