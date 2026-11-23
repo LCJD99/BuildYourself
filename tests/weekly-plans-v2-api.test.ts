@@ -287,6 +287,16 @@ describe('v0.2 首周规划 HTTP API', () => {
     const secondGoal = secondResult.goal;
     expect(secondResult.weeklyPlanGeneration.status).toBe('failed');
     expect(secondResult.weeklyPlanGeneration.error).toContain('每个已启用目标');
+    const requiredOnSecondAttempt = proposeWeeklyPlan.mock.calls[1][0];
+    expect(requiredOnSecondAttempt.requiredGoalIds).toEqual(expect.arrayContaining([firstGoal.id, secondGoal.id]));
+    expect(requiredOnSecondAttempt.requiredGoals.map((goal: { id: string }) => goal.id))
+      .toEqual(expect.arrayContaining([firstGoal.id, secondGoal.id]));
+    for (const requiredGoal of requiredOnSecondAttempt.requiredGoals as Array<{ id: string; attributes: Array<{ id: string }> }>) {
+      expect(requiredGoal.attributes.length).toBeGreaterThan(0);
+      expect(requiredGoal.attributes.every(attribute =>
+        requiredOnSecondAttempt.goals.find((goal: { id: string }) => goal.id === requiredGoal.id)?.attributes.some((item: { id: string }) => item.id === attribute.id),
+      )).toBe(true);
+    }
 
     proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
       goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
@@ -302,6 +312,10 @@ describe('v0.2 首周规划 HTTP API', () => {
 
     expect(retry.status).toBe(200);
     expect(retried.generation.status).toBe('ready');
+    const retryInput = proposeWeeklyPlan.mock.calls[2][0];
+    expect(retryInput.requiredGoalIds).toEqual(expect.arrayContaining([firstGoal.id, secondGoal.id]));
+    expect(retryInput.requiredGoals.map((goal: { id: string }) => goal.id))
+      .toEqual(expect.arrayContaining([firstGoal.id, secondGoal.id]));
     expect(retried.plan.actions).toHaveLength(2);
     expect(retried.plan.actions.some((action: { goalIds: string[] }) => action.goalIds.includes(firstGoal.id))).toBe(true);
     expect(retried.plan.actions.some((action: { goalIds: string[] }) => action.goalIds.includes(secondGoal.id))).toBe(true);

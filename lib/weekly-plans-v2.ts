@@ -211,6 +211,11 @@ function goalSnapshot(goals: GoalV2[]) {
   return goals.map(goal => `${goal.id}:${goal.attributes.map(attribute => attribute.id).sort().join(',')}`).sort();
 }
 
+function actionCoversGoal(action: WeeklyPlanAction, goal: GoalV2) {
+  return action.goalIds.includes(goal.id)
+    && action.attributeIds.some(attributeId => goal.attributes.some(attribute => attribute.id === attributeId));
+}
+
 function persistedGoalSnapshot(database: DatabaseSync) {
   const goals = database.prepare('SELECT id FROM v2_goals ORDER BY id').all() as Array<{ id: string }>;
   return goals.map(goal => {
@@ -252,10 +257,13 @@ export async function generateWeeklyPlanForGoal(goalId: string, weekStart = curr
   });
 
   try {
-    const proposal = await proposeWeeklyPlan({ weekStart, goals, currentPlan: start.baselineRevision ? { actions: start.current } : null, focusGoalId: goalId });
+    const requiredGoals = goals.filter(goal => !start.current.some(action => actionCoversGoal(action, goal)));
+    const proposal = await proposeWeeklyPlan({
+      weekStart, goals, currentPlan: start.baselineRevision ? { actions: start.current } : null,
+      focusGoalId: goalId, requiredGoalIds: requiredGoals.map(goal => goal.id), requiredGoals,
+    });
     const actions = validateActions({ actions: proposal.actions, goals, weekStart, previous: start.current });
-    const uncoveredGoals = goals.filter(goal => !actions.some(action => action.goalIds.includes(goal.id)
-      && action.attributeIds.some(attributeId => goal.attributes.some(attribute => attribute.id === attributeId))));
+    const uncoveredGoals = goals.filter(goal => !actions.some(action => actionCoversGoal(action, goal)));
     if (uncoveredGoals.length) {
       const focusMissing = uncoveredGoals.some(goal => goal.id === goalId);
       throw new GoalDraftError(focusMissing

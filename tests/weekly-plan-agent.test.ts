@@ -37,13 +37,19 @@ describe('v0.2 每周规划 PI 适配器', () => {
       date: '2026-11-25', goalIds: ['goal-1'], attributeIds: ['attribute-1'],
     }] });
 
-    const result = await proposeWeeklyPlan({ weekStart: '2026-11-23', goals, currentPlan: { actions: [existing] }, focusGoalId: 'goal-1' });
+    const result = await proposeWeeklyPlan({
+      weekStart: '2026-11-23', goals, currentPlan: { actions: [existing] },
+      focusGoalId: 'goal-1', requiredGoalIds: ['goal-1'], requiredGoals: goals,
+    });
 
     expect(result.actions[0]).not.toHaveProperty('id');
     expect(result.actions[0].operation).toBe('add');
     expect(stdinEnd).toHaveBeenCalledOnce();
     const prompt = JSON.parse(String(execFile.mock.calls[0][1].at(-1)));
-    expect(prompt).toMatchObject({ task: 'add_goal_to_weekly_plan', focusGoalId: 'goal-1' });
+    expect(prompt).toMatchObject({
+      task: 'add_goal_to_weekly_plan', focusGoalId: 'goal-1', requiredGoalIds: ['goal-1'],
+      requiredGoals: [{ id: 'goal-1', attributes: [{ id: 'attribute-1', name: '口语', description: '口语清晰度', progress: 0 }] }],
+    });
   });
 
   it('不允许新增操作复用当前规划中的旧行动 ID', async () => {

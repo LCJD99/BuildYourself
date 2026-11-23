@@ -15,7 +15,7 @@ export type WeeklyPlanAgentResult = {
   actions: Array<Omit<WeeklyPlanAction, 'id'> & { operation: 'add' | 'update'; id?: string }>;
 };
 
-const systemPrompt = `你负责为已启用的长期目标拟定一周行动安排，或按用户要求修改现有草稿。只返回一个 JSON 对象，不要 Markdown：{"reply":"中文回复","actions":[{"operation":"add 或 update","id":"update 时必须填写输入中现有行动的准确 ID；add 时省略","title":"行动名称","description":"简短说明","date":"YYYY-MM-DD","goalIds":["目标 ID"],"attributeIds":["属性 ID"]}]}。每个行动必须对应至少一个已启用目标及至少一个属于这些目标的属性；日期必须在给定周内，不安排具体时刻。目标或属性关联必须使用输入中的 ID。当输入提供 focusGoalId 时，必须至少新增或更新一项关联该目标及其属性的行动。每个返回项必须明确 operation：修改现有行动用 update 并逐字复制该行动的准确 ID；新增行动用 add 且不带 ID。绝不通过标题推断行动身份。只返回新增或修改的行动，未列出的旧行动会由系统自动保留；如果现有规划无需改变，返回空 actions 列表。不要生成、删除或推断任何未要求的变化，不要声称未生成或未应用的结果已经完成。`;
+const systemPrompt = `你负责为已启用的长期目标拟定一周行动安排，或按用户要求修改现有草稿。只返回一个 JSON 对象，不要 Markdown：{"reply":"中文回复","actions":[{"operation":"add 或 update","id":"update 时必须填写输入中现有行动的准确 ID；add 时省略","title":"行动名称","description":"简短说明","date":"YYYY-MM-DD","goalIds":["目标 ID"],"attributeIds":["属性 ID"]}]}。每个行动必须对应至少一个已启用目标及至少一个属于这些目标的属性；日期必须在给定周内，不安排具体时刻。目标或属性关联必须使用输入中的 ID。当输入提供 requiredGoals 和 requiredGoalIds 时，必须为 requiredGoals 中每个目标新增或修改至少一项行动，并使用该目标记录中的一个或多个属性 ID；不能遗漏任何 requiredGoalIds 中的目标。当输入提供 focusGoalId 时，该目标也必须有行动关联。每个返回项必须明确 operation：修改现有行动用 update 并逐字复制该行动的准确 ID；新增行动用 add 且不带 ID。绝不通过标题推断行动身份。只返回新增或修改的行动，未列出的旧行动会由系统自动保留；如果现有规划无需改变，返回空 actions 列表。不要生成、删除或推断任何未要求的变化，不要声称未生成或未应用的结果已经完成。`;
 
 function invokePi(prompt: string): Promise<string> {
   const command = process.env.BUILDYOURSELF_PI_BIN || 'pi';
@@ -100,6 +100,8 @@ export async function proposeWeeklyPlan(input: {
   goals: GoalV2[];
   currentPlan: { actions: WeeklyPlanAction[] } | null;
   focusGoalId?: string;
+  requiredGoalIds?: string[];
+  requiredGoals?: GoalV2[];
   message?: string;
 }): Promise<WeeklyPlanAgentResult> {
   const result = parseResult(await invokePi(JSON.stringify({
@@ -108,6 +110,8 @@ export async function proposeWeeklyPlan(input: {
     days: Array.from({ length: 7 }, (_, index) => new Date(new Date(`${input.weekStart}T00:00:00.000Z`).getTime() + index * 86_400_000).toISOString().slice(0, 10)),
     goals: input.goals,
     focusGoalId: input.focusGoalId ?? null,
+    requiredGoalIds: input.requiredGoalIds ?? [],
+    requiredGoals: input.requiredGoals ?? [],
     currentPlan: input.currentPlan,
     userMessage: input.message ?? null,
   })), new Set(input.currentPlan?.actions.map(action => action.id) ?? []));
