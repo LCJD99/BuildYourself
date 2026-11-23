@@ -166,7 +166,7 @@ function getWeeklyPlanFromDatabase(database: DatabaseSync, id: string) {
 }
 
 function validateActions(input: {
-  actions: Array<{ id?: string; title: string; description: string; date: string; goalIds: string[]; attributeIds: string[] }>;
+  actions: Array<{ operation: 'add' | 'update'; id?: string; title: string; description: string; date: string; goalIds: string[]; attributeIds: string[] }>;
   goals: GoalV2[];
   weekStart: string;
   previous: WeeklyPlanAction[];
@@ -174,11 +174,6 @@ function validateActions(input: {
   const goalsById = new Map(input.goals.map(goal => [goal.id, goal]));
   const attributesById = new Map(input.goals.flatMap(goal => goal.attributes.map(attribute => [attribute.id, goal.id] as const)));
   const previousById = new Map(input.previous.map(action => [action.id, action]));
-  const previousByTitle = new Map<string, WeeklyPlanAction[]>();
-  for (const action of input.previous) previousByTitle.set(action.title, [...(previousByTitle.get(action.title) ?? []), action]);
-  const explicitlyReferencedPreviousIds = new Set(input.actions
-    .map(action => action.id)
-    .filter((id): id is string => Boolean(id && previousById.has(id))));
   const assignedIds = new Set<string>();
   const updated = input.actions.map((action, index) => {
     if (!action.title.trim() || !validDate(action.date) || action.date < input.weekStart || action.date > addDays(input.weekStart, 6)) {
@@ -193,13 +188,11 @@ function validateActions(input: {
       throw new GoalDraftError(`第 ${index + 1} 个行动关联了不属于相关目标的属性。`, 502);
     }
     let id: string;
-    if (action.id && previousById.has(action.id)) id = action.id;
-    else {
-      const ambiguousOldActions = (previousByTitle.get(action.title) ?? [])
-        .filter(candidate => !explicitlyReferencedPreviousIds.has(candidate.id));
-      if (ambiguousOldActions.length) {
-        throw new GoalDraftError(`第 ${index + 1} 个行动缺少有效旧 ID，无法判断它是对同名行动的修改还是新行动。`, 502);
-      }
+    if (action.operation === 'update') {
+      if (!action.id || !previousById.has(action.id)) throw new GoalDraftError(`第 ${index + 1} 个修改行动必须引用当前版本中的有效 ID。`, 502);
+      id = action.id;
+    } else {
+      if (action.id) throw new GoalDraftError(`第 ${index + 1} 个新增行动不能指定旧 ID。`, 502);
       id = randomUUID();
     }
     if (assignedIds.has(id)) throw new GoalDraftError('行动 ID 必须唯一。', 502);
@@ -259,7 +252,10 @@ export async function generateWeeklyPlanForGoal(goalId: string, weekStart = curr
   });
 
   try {
-    const proposal = await proposeWeeklyPlan({ weekStart, goals, currentPlan: start.baselineRevision ? { actions: start.current } : null });
+    const proposal = await proposeWeeklyPlan({ weekStart, goals, currentPlan: start.baselineRevision ? { actions: start.current } : null, focusGoalId: goalId });
+    if (!proposal.actions.some(action => action.goalIds.includes(goalId))) {
+      throw new GoalDraftError('Agent 没有为新启用目标生成关联行动。', 502);
+    }
     const actions = validateActions({ actions: proposal.actions, goals, weekStart, previous: start.current });
     if (JSON.stringify(goalSnapshot(listEnabledGoals())) !== JSON.stringify(goalSnapshot(goals))) {
       throw new GoalDraftError('已启用目标发生变化，请基于最新目标重新生成规划。', 409);

@@ -38,8 +38,9 @@ beforeEach(() => {
     message?: string;
   }) => ({
     reply: '已生成本周行动安排。',
-    actions: currentPlan?.actions.map(action => ({ ...action, date: message ? '2026-11-25' : action.date }))
+    actions: currentPlan?.actions.map(action => ({ ...action, operation: 'update' as const, date: message ? '2026-11-25' : action.date }))
       ?? [{
+        operation: 'add' as const,
         title: '准备一段英文项目介绍', description: '写出并练习项目介绍。', date: '2026-11-23',
         goalIds: goals.map(goal => goal.id), attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
       }],
@@ -123,6 +124,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     const first = weeklyPlanGeneration.plan;
     proposeWeeklyPlan.mockResolvedValueOnce({
       reply: '安排已调整。', actions: [{
+        operation: 'update', id: first.actions[0].id,
         title: '无效跨目标关联', date: '2026-11-24', goalIds: [goal.id], attributeIds: ['not-an-attribute'],
       }],
     });
@@ -146,9 +148,10 @@ describe('v0.2 首周规划 HTTP API', () => {
     }) => ({
       reply: '已合并两个目标的共同行动。',
       actions: [currentPlan ? {
-        ...currentPlan.actions[0], goalIds: goals.map(goal => goal.id),
+        ...currentPlan.actions[0], operation: 'update' as const, goalIds: goals.map(goal => goal.id),
         attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
       } : {
+        operation: 'add' as const,
         title: '准备双语项目介绍', description: '用英语和中文演练项目说明。', date: '2026-11-24',
         goalIds: goals.map(goal => goal.id), attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
       }],
@@ -184,6 +187,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
       goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
     }) => ({ reply: '已安排原有目标行动。', actions: [{
+      operation: 'add' as const,
       title: '原目标练习', description: '保留原安排。', date: weekStart,
       goalIds: [goals[0].id], attributeIds: [goals[0].attributes[0].id],
     }] }));
@@ -201,6 +205,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     }) => {
       const addedGoal = goals.find(goal => goal.id !== firstGoal.id)!;
       return { reply: '为新增目标安排行动。', actions: [{
+        operation: 'add' as const,
         title: '新增目标练习', description: '推动新增目标。', date: weekStart,
         goalIds: [addedGoal.id], attributeIds: [addedGoal.attributes[0].id],
       }] };
@@ -214,6 +219,49 @@ describe('v0.2 首周规划 HTTP API', () => {
     expect((await beforeSwitch.json()).activePlan).toMatchObject({ revision: firstPlan.revision, actions: firstPlan.actions });
   });
 
+  it('Agent 未为新目标提出行动时标记失败，使用同一目标重试后才生成新版本', async () => {
+    const firstEnabled = await enableGoal();
+    const firstResult = await firstEnabled.json();
+    const firstGoal = firstResult.goal;
+    const firstPlan = firstResult.weeklyPlanGeneration.plan;
+    const initialConfirmation = await confirmWeeklyPlan(new Request(`http://localhost/api/v2/weekly-plans/${firstPlan.id}/confirm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision: firstPlan.revision }),
+    }), params(firstPlan.id));
+    expect(initialConfirmation.status).toBe(200);
+
+    proposeWeeklyPlan.mockResolvedValueOnce({ reply: '保留旧安排。', actions: [{
+      operation: 'update', id: firstPlan.actions[0].id, ...firstPlan.actions[0], goalIds: [firstGoal.id],
+    }] });
+    const secondEnabled = await enableGoal();
+    const secondResult = await secondEnabled.json();
+    const secondGoal = secondResult.goal;
+    expect(secondResult.weeklyPlanGeneration.status).toBe('failed');
+    expect(secondResult.weeklyPlanGeneration.error).toContain('新启用目标');
+    const beforeRetry = await getWeeklyPlan(new Request('http://localhost'), params(firstPlan.id));
+    expect((await beforeRetry.json()).activePlan.revision).toBe(1);
+
+    proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
+      goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
+    }) => {
+      const target = goals.find(goal => goal.id === secondGoal.id)!;
+      return { reply: '已为新目标增加行动。', actions: [{
+        operation: 'add' as const, title: '新增目标专项练习', description: '完成新目标对应的练习。', date: weekStart,
+        goalIds: [target.id], attributeIds: [target.attributes[0].id],
+      }] };
+    });
+    const retry = await retryGeneration(new Request(`http://localhost/api/v2/goals/${secondGoal.id}/weekly-plans`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weekStart: secondResult.weeklyPlanGeneration.weekStart }),
+    }), params(secondGoal.id));
+    const retried = await retry.json();
+
+    expect(retry.status).toBe(200);
+    expect(retried.plan.revision).toBe(2);
+    expect(retried.plan.actions.map((action: { id: string }) => action.id)).toContain(firstPlan.actions[0].id);
+    expect(retried.plan.actions.some((action: { goalIds: string[] }) => action.goalIds.includes(secondGoal.id))).toBe(true);
+    expect(retried.generation.goalId).toBe(secondGoal.id);
+  });
+
   it('较早返回的 Agent 编辑结果不能覆盖较新的规划草稿', async () => {
     const enabled = await enableGoal();
     const { plan: first } = (await enabled.json()).weeklyPlanGeneration;
@@ -221,7 +269,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     proposeWeeklyPlan
       .mockImplementationOnce(() => new Promise(resolve => { releaseFirst = resolve; }))
       .mockImplementationOnce(async ({ currentPlan }: { currentPlan: { actions: typeof first.actions } }) => ({
-        reply: '较新的调整已生成。', actions: currentPlan.actions.map((action: typeof first.actions[number]) => ({ ...action, date: '2026-11-26' })),
+        reply: '较新的调整已生成。', actions: currentPlan.actions.map((action: typeof first.actions[number]) => ({ ...action, operation: 'update' as const, date: '2026-11-26' })),
       }));
     const request = (message: string) => new Request(`http://localhost/api/v2/weekly-plans/${first.id}/messages`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -230,7 +278,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     const earlier = editWeeklyPlan(request('较早发出的请求'), params(first.id));
     const laterResponse = await editWeeklyPlan(request('较晚发出的请求'), params(first.id));
     const later = await laterResponse.json();
-    releaseFirst({ reply: '旧调整返回。', actions: first.actions.map((action: typeof first.actions[number]) => ({ ...action, date: '2026-11-24' })) });
+    releaseFirst({ reply: '旧调整返回。', actions: first.actions.map((action: typeof first.actions[number]) => ({ ...action, operation: 'update' as const, date: '2026-11-24' })) });
     const earlierResponse = await earlier;
 
     expect(laterResponse.status).toBe(200);
@@ -248,14 +296,14 @@ describe('v0.2 首周规划 HTTP API', () => {
     proposeWeeklyPlan
       .mockImplementationOnce(() => new Promise(resolve => { releaseFirst = resolve; }))
       .mockImplementationOnce(async ({ currentPlan }: { currentPlan: { actions: typeof first.actions } }) => ({
-        reply: '较新的规划已生成。', actions: currentPlan.actions.map((action: typeof first.actions[number]) => ({ ...action, date: '2026-11-27' })),
+        reply: '较新的规划已生成。', actions: currentPlan.actions.map((action: typeof first.actions[number]) => ({ ...action, operation: 'update' as const, date: '2026-11-27' })),
       }));
     const request = () => new Request(`http://localhost/api/v2/goals/${goal.id}/weekly-plans`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weekStart: weeklyPlanGeneration.weekStart }),
     });
     const earlier = retryGeneration(request(), params(goal.id));
     const later = await retryGeneration(request(), params(goal.id));
-    releaseFirst({ reply: '旧规划返回。', actions: first.actions.map((action: typeof first.actions[number]) => ({ ...action, date: '2026-11-24' })) });
+    releaseFirst({ reply: '旧规划返回。', actions: first.actions.map((action: typeof first.actions[number]) => ({ ...action, operation: 'update' as const, date: '2026-11-24' })) });
     const earlierResponse = await earlier;
     const latest = await getWeeklyPlan(new Request('http://localhost'), params(first.id));
 
@@ -264,10 +312,11 @@ describe('v0.2 首周规划 HTTP API', () => {
     expect((await latest.json()).plan.actions[0].date).toBe('2026-11-27');
   });
 
-  it('模型临时 ID 无法区分同名旧行动时拒绝整轮修改', async () => {
+  it('模型临时 ID 或遗漏的 ID 都不能把旧行动修改静默变成新增', async () => {
     proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
       goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
     }) => ({ reply: '安排两次练习。', actions: [1, 2].map(() => ({
+      operation: 'add' as const,
       title: '练习英文介绍', description: '口头练习。', date: weekStart,
       goalIds: goals.map(goal => goal.id), attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
     })) }));
@@ -276,7 +325,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     expect(first.actions).toHaveLength(2);
     expect(first.actions[0].id).not.toBe(first.actions[1].id);
     proposeWeeklyPlan.mockResolvedValueOnce({ reply: '已调整。', actions: first.actions.map((action: typeof first.actions[number], index: number) => ({
-      ...action, id: `temporary-${index}`, date: '2026-11-24',
+      ...action, operation: 'update' as const, id: `temporary-${index}`, date: '2026-11-24',
     })) });
 
     const response = await editWeeklyPlan(new Request(`http://localhost/api/v2/weekly-plans/${first.id}/messages`, {
@@ -284,6 +333,16 @@ describe('v0.2 首周规划 HTTP API', () => {
       body: JSON.stringify({ revision: first.revision, message: '调整两次练习日期' }),
     }), params(first.id));
     expect(response.status).toBe(502);
+
+    proposeWeeklyPlan.mockResolvedValueOnce({ reply: '已改名。', actions: [{
+      operation: 'update', id: undefined, title: '改名后的练习', description: '修改旧行动。', date: '2026-11-24',
+      goalIds: first.actions[0].goalIds, attributeIds: first.actions[0].attributeIds,
+    }] });
+    const missingId = await editWeeklyPlan(new Request(`http://localhost/api/v2/weekly-plans/${first.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: first.revision, message: '修改行动名称' }),
+    }), params(first.id));
+    expect(missingId.status).toBe(502);
     const reopened = await getWeeklyPlan(new Request('http://localhost'), params(first.id));
     expect((await reopened.json()).plan.revision).toBe(first.revision);
   });
@@ -292,6 +351,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
       goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
     }) => ({ reply: '已安排两项行动。', actions: ['练习英文介绍', '收听英文播客'].map(title => ({
+      operation: 'add' as const,
       title, description: title, date: weekStart,
       goalIds: goals.map(goal => goal.id), attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
     })) }));
@@ -300,7 +360,7 @@ describe('v0.2 首周规划 HTTP API', () => {
     const changed = first.actions[0];
     const omitted = first.actions[1];
     proposeWeeklyPlan.mockResolvedValueOnce({ reply: '已将练习改到周三。', actions: [{
-      ...changed, date: '2026-11-25',
+      ...changed, operation: 'update' as const, date: '2026-11-25',
     }] });
 
     const response = await editWeeklyPlan(new Request(`http://localhost/api/v2/weekly-plans/${first.id}/messages`, {
@@ -315,10 +375,27 @@ describe('v0.2 首周规划 HTTP API', () => {
     expect(revised.actions).toContainEqual(omitted);
   });
 
+  it('Agent 只回复无需调整时接受空变更并保留完整安排', async () => {
+    const enabled = await enableGoal();
+    const first = (await enabled.json()).weeklyPlanGeneration.plan;
+    proposeWeeklyPlan.mockResolvedValueOnce({ reply: '当前安排已经符合要求。', actions: [] });
+
+    const response = await editWeeklyPlan(new Request(`http://localhost/api/v2/weekly-plans/${first.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: first.revision, message: '确认一下现在的安排，无需改变' }),
+    }), params(first.id));
+    const revised = (await response.json()).plan;
+
+    expect(response.status).toBe(200);
+    expect(revised.actions).toEqual(first.actions);
+    expect(revised.userMessage).toBe('确认一下现在的安排，无需改变');
+  });
+
   it('旧行动明确沿用 ID 时允许新增同名行动且分配新 ID', async () => {
     proposeWeeklyPlan.mockImplementationOnce(async ({ goals, weekStart }: {
       goals: Array<{ id: string; attributes: Array<{ id: string }> }>; weekStart: string;
     }) => ({ reply: '已安排一次练习。', actions: [{
+      operation: 'add' as const,
       title: '练习英文介绍', description: '原行动。', date: weekStart,
       goalIds: goals.map(goal => goal.id), attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
     }] }));
@@ -326,8 +403,8 @@ describe('v0.2 首周规划 HTTP API', () => {
     const first = (await enabled.json()).weeklyPlanGeneration.plan;
     const original = first.actions[0];
     proposeWeeklyPlan.mockResolvedValueOnce({ reply: '保留原行动并新增一次练习。', actions: [
-      original,
-      { ...original, id: undefined, description: '新增行动。', date: '2026-11-26' },
+      { ...original, operation: 'update' as const },
+      { ...original, operation: 'add' as const, id: undefined, description: '新增行动。', date: '2026-11-26' },
     ] });
 
     const response = await editWeeklyPlan(new Request(`http://localhost/api/v2/weekly-plans/${first.id}/messages`, {

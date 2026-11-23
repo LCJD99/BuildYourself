@@ -12,10 +12,10 @@ export type WeeklyPlanAction = {
 
 export type WeeklyPlanAgentResult = {
   reply: string;
-  actions: Array<Omit<WeeklyPlanAction, 'id'> & { id?: string }>;
+  actions: Array<Omit<WeeklyPlanAction, 'id'> & { operation: 'add' | 'update'; id?: string }>;
 };
 
-const systemPrompt = `你负责为已启用的长期目标拟定一周行动安排，或按用户要求修改现有草稿。只返回一个 JSON 对象，不要 Markdown：{"reply":"中文回复","actions":[{"id":"沿用现有行动时填写输入中的原 ID；新行动留空","title":"行动名称","description":"简短说明","date":"YYYY-MM-DD","goalIds":["目标 ID"],"attributeIds":["属性 ID"]}]}。每个行动必须对应至少一个已启用目标及至少一个属于这些目标的属性；日期必须在给定周内，不安排具体时刻。目标或属性关联必须使用输入中的 ID。修改时只返回新增或修改的行动，任何修改过的现有行动都必须带输入中的准确旧 ID；未列出的旧行动会由系统自动保留。不要生成、删除或推断任何未要求的变化，不要声称未生成或未应用的结果已经完成。`;
+const systemPrompt = `你负责为已启用的长期目标拟定一周行动安排，或按用户要求修改现有草稿。只返回一个 JSON 对象，不要 Markdown：{"reply":"中文回复","actions":[{"operation":"add 或 update","id":"update 时必须填写输入中现有行动的准确 ID；add 时省略","title":"行动名称","description":"简短说明","date":"YYYY-MM-DD","goalIds":["目标 ID"],"attributeIds":["属性 ID"]}]}。每个行动必须对应至少一个已启用目标及至少一个属于这些目标的属性；日期必须在给定周内，不安排具体时刻。目标或属性关联必须使用输入中的 ID。当输入提供 focusGoalId 时，必须至少新增或更新一项关联该目标及其属性的行动。每个返回项必须明确 operation：修改现有行动用 update 并逐字复制该行动的准确 ID；新增行动用 add 且不带 ID。绝不通过标题推断行动身份。只返回新增或修改的行动，未列出的旧行动会由系统自动保留；如果现有规划无需改变，返回空 actions 列表。不要生成、删除或推断任何未要求的变化，不要声称未生成或未应用的结果已经完成。`;
 
 function invokePi(prompt: string): Promise<string> {
   const command = process.env.BUILDYOURSELF_PI_BIN || 'pi';
@@ -54,16 +54,18 @@ function parseResult(stdout: string): WeeklyPlanAgentResult {
   if (typeof result.reply !== 'string' || !result.reply.trim() || !Array.isArray(result.actions)) {
     throw new GoalDraftError('PI Agent 必须返回说明和行动列表。', 502);
   }
-  if (!result.actions.length) throw new GoalDraftError('PI Agent 没有为本周生成任何行动。', 502);
   if (result.actions.length > 100) throw new GoalDraftError('PI Agent 返回的行动过多。', 502);
   const actions = result.actions.map((value, index) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new GoalDraftError(`第 ${index + 1} 个行动格式无效。`, 502);
     const action = value as Record<string, unknown>;
-    if (Object.keys(action).some(key => !['id', 'actionId', 'title', 'description', 'date', 'goalIds', 'attributeIds'].includes(key))) {
+    if (Object.keys(action).some(key => !['operation', 'id', 'actionId', 'title', 'description', 'date', 'goalIds', 'attributeIds'].includes(key))) {
       throw new GoalDraftError(`第 ${index + 1} 个行动含无法识别的字段。`, 502);
     }
+    if (action.operation !== 'add' && action.operation !== 'update') throw new GoalDraftError(`第 ${index + 1} 个行动缺少明确的新增或修改操作。`, 502);
+    const operation = action.operation as 'add' | 'update';
     const proposedId = action.id ?? action.actionId;
     const id = typeof proposedId === 'string' && proposedId.trim() ? proposedId.trim() : undefined;
+    if (operation === 'update' && !id) throw new GoalDraftError(`第 ${index + 1} 个修改行动必须提供有效的旧行动 ID。`, 502);
     if (typeof action.title !== 'string' || !action.title.trim()
       || (action.description !== undefined && typeof action.description !== 'string')
       || typeof action.date !== 'string'
@@ -72,7 +74,8 @@ function parseResult(stdout: string): WeeklyPlanAgentResult {
       throw new GoalDraftError(`第 ${index + 1} 个行动缺少必需信息。`, 502);
     }
     return {
-      ...(id === undefined ? {} : { id }),
+      operation,
+      ...(operation === 'update' && id ? { id } : {}),
       title: action.title.trim(),
       description: typeof action.description === 'string' ? action.description.trim() : '',
       date: action.date,
@@ -87,16 +90,19 @@ export async function proposeWeeklyPlan(input: {
   weekStart: string;
   goals: GoalV2[];
   currentPlan: { actions: WeeklyPlanAction[] } | null;
+  focusGoalId?: string;
   message?: string;
 }): Promise<WeeklyPlanAgentResult> {
   const result = parseResult(await invokePi(JSON.stringify({
-    task: input.currentPlan ? 'revise_weekly_plan' : 'generate_weekly_plan',
+    task: input.focusGoalId ? 'add_goal_to_weekly_plan' : input.currentPlan ? 'revise_weekly_plan' : 'generate_weekly_plan',
     weekStart: input.weekStart,
     days: Array.from({ length: 7 }, (_, index) => new Date(new Date(`${input.weekStart}T00:00:00.000Z`).getTime() + index * 86_400_000).toISOString().slice(0, 10)),
     goals: input.goals,
+    focusGoalId: input.focusGoalId ?? null,
     currentPlan: input.currentPlan,
     userMessage: input.message ?? null,
   })));
+  if (!input.currentPlan && result.actions.length === 0) throw new GoalDraftError('PI Agent 没有为本周生成任何行动。', 502);
   // New actions receive their stable IDs in the persistence layer; the provider never owns identity.
   return result;
 }

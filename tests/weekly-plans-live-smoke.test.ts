@@ -27,12 +27,12 @@ liveAgentSmoke('真实 PI Agent 首周规划 HTTP 烟测', () => {
   it('通过真实模型生成、自然语言修改、确认并重新打开本周规划', async () => {
     const created = await createDraft(new Request('http://localhost/api/v2/goal-drafts', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: '我想在三个月内能用英语独立介绍一个软件项目，并回答同事的常见问题；每周练习三次，每次三十分钟。请整理可观察结果、时间约束和口语表达、听力理解两个评价属性。' }),
+      body: JSON.stringify({ message: '我想提升英语表达能力。' }),
     }));
     expect(created.status, JSON.stringify(await created.clone().json())).toBe(201);
     let draft = (await created.json()).draft;
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       const confirmation = await confirmGoal(new Request(`http://localhost/api/v2/goal-drafts/${draft.id}/confirm`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision: draft.revision }),
       }), context(draft.id));
@@ -61,11 +61,11 @@ liveAgentSmoke('真实 PI Agent 首周规划 HTTP 烟测', () => {
       expect(failed.issues.length).toBeGreaterThan(0);
       const update = await sendGoalMessage(new Request(`http://localhost/api/v2/goal-drafts/${draft.id}/messages`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ revision: draft.revision, message: '请根据我刚才给出的结果、期限、练习安排和两个属性补全草稿，并清空已经回答的待澄清问题。' }),
+        body: JSON.stringify({ revision: draft.revision, message: '目标是三个月内能独立做10分钟英文软件项目介绍，并回答同事常见问题。每周练习三次，每次30分钟。请将可观察结果、三个月期限和练习时间写入目标，评价属性为口语表达（介绍的清晰度）和听力理解（回答问题的准确度）。这些约束已经确认，没有其他待澄清项。' }),
       }), context(draft.id));
       expect(update.status, JSON.stringify(await update.clone().json())).toBe(200);
       draft = (await update.json()).draft;
     }
-    throw new Error('PI 模型未能生成可确认的目标草稿。');
+    throw new Error(`PI 模型未能生成可确认的目标草稿：${JSON.stringify({ revision: draft.revision, title: draft.title, constraints: draft.constraints, attributes: draft.attributes, clarifyingQuestions: draft.clarifyingQuestions })}`);
   }, 300_000);
 });

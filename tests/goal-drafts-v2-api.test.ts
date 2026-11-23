@@ -24,6 +24,7 @@ beforeEach(() => {
   proposeWeeklyPlan.mockImplementation(async ({ weekStart, goals }: {
     weekStart: string; goals: Array<{ id: string; attributes: Array<{ id: string }> }>;
   }) => ({ reply: '已生成首周规划。', actions: [{
+    operation: 'add' as const,
     title: '准备英文介绍', description: '练习英文项目介绍。', date: weekStart,
     goalIds: goals.map(goal => goal.id), attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
   }] }));
