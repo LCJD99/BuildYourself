@@ -1,9 +1,11 @@
 import { listGoalPlans, listGoalPlanActions, listPendingGoalActions, saveGoalPlanDraft } from '@/lib/goal-plans';
 import { listChangeEvents } from '@/lib/milestone-store';
+import { ensureDemoData } from '@/lib/demo-seed';
 
 export const dynamic = 'force-dynamic';
 
-export function GET() {
+export async function GET() {
+  await ensureDemoData();
   const changes = listChangeEvents().filter(event => event.eventType === 'task.created' || event.eventType === 'task.updated');
   return Response.json({
     plans: listGoalPlans(),

@@ -1,9 +1,11 @@
 import { listExternalCommitments, saveExternalCommitment } from '../../../lib/commitments';
 import { listGoalPlans } from '../../../lib/goal-plans';
+import { ensureDemoData } from '../../../lib/demo-seed';
 
 export const dynamic = 'force-dynamic';
 
-export function GET() {
+export async function GET() {
+  await ensureDemoData();
   const commitments = listExternalCommitments();
   const goals = listGoalPlans()
     .filter(goal => goal.status === 'active')

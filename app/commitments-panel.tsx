@@ -62,10 +62,10 @@ export default function CommitmentsPanel() {
         <div><span className="kicker">EXTERNAL COMMITMENTS</span><h2 id="commitments-title">外部承诺</h2></div>
         <span className="subtle">事实确认与排期分开处理</span>
       </div>
-      <p className="commitments-intro">在 pi 中核对并保存的通知会显示在这里。保存承诺不会改动既有计划；每条承诺仍标记为尚未排入。</p>
+      <p className="commitments-intro">通过页面内演示 Agent 登记的通知会显示在这里。保存承诺不会改动既有计划；每条承诺仍标记为尚未排入。</p>
       {error && <p className="commitment-error" role="alert">{error}</p>}
       {state.commitments.length === 0 ? (
-        <div className="commitment-empty"><strong>暂无已确认的外部承诺</strong><p>在 pi 中使用 <code>/commitment</code> 并粘贴通知，核对字段后再保存。</p></div>
+        <div className="commitment-empty"><strong>暂无已确认的外部承诺</strong><p>在页面内 Agent 中使用 <code>/commitment</code> 并粘贴通知，即可生成演示承诺。</p></div>
       ) : [...groups.entries()].map(([key, group]) => (
         <div className="commitment-group" key={key}>
           <h3>{group.title}</h3>

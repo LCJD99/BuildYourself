@@ -112,6 +112,7 @@ export default function DailyPlanPanel({
   const plan = record.plan;
   const today = localDateString(new Date());
   const todayActions = record.status === 'confirmed' ? plan?.days.find(day => day.date === today)?.actions ?? [] : [];
+  const highlightedTodayActions = todayActions.slice(0, 3);
   const availableCapacities = { ...defaultCapacities(weekStart), ...capacities };
 
   function actionButton(action: DailyPlanAction, className = '') {
@@ -143,8 +144,14 @@ export default function DailyPlanPanel({
 
       <section className="today-actions" aria-labelledby="today-actions-title">
         <div className="today-actions-heading"><div><span className="kicker">START HERE</span><h3 id="today-actions-title">今日关键行动</h3></div><span className="count">{todayActions.length}</span></div>
-        {todayActions.length ? <div className="daily-actions-list">{todayActions.map(action => actionButton(action, 'today-daily-action'))}</div> : (
+        {highlightedTodayActions.length ? <div className="daily-actions-list">{highlightedTodayActions.map(action => actionButton(action, 'today-daily-action'))}</div> : (
           <p className="today-actions-empty">{record.status === 'draft' ? '确认周安排后，这里会显示今天的关键行动。' : plan ? '今天没有已安排行动。' : '生成并确认周安排后，这里会显示今天的行动。'}</p>
+        )}
+        {todayActions.length > highlightedTodayActions.length && (
+          <details className="more-today-actions">
+            <summary>查看其余 {todayActions.length - highlightedTodayActions.length} 项今日行动</summary>
+            <div className="daily-actions-list">{todayActions.slice(highlightedTodayActions.length).map(action => actionButton(action, 'today-daily-action'))}</div>
+          </details>
         )}
       </section>
 

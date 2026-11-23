@@ -307,13 +307,13 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
     <section className="goal-plans" aria-labelledby="goal-plans-title">
       <div className="section-title goal-plans-heading">
         <div><span className="kicker">GOAL CONTRACTS</span><h2 id="goal-plans-title">自然语言目标计划</h2></div>
-        <span className="subtle">Pi 对话生成 · 用户确认状态变更</span>
+        <span className="subtle">演示 Agent 生成 · 用户确认状态变更</span>
       </div>
       {error && <p role="alert" className="error">{error}</p>}
       {!state.plans.length && (
         <div className="goal-empty">
           <strong>从一句目标意图开始</strong>
-          <p>在 pi 中输入“我想学英语”，Agent 会先澄清影响计划的场景、结果、基础和限制，再生成可编辑草稿。</p>
+          <p>在页面内 Agent 中输入“我想学英语”，演示规则会生成一份可编辑的目标草稿。</p>
         </div>
       )}
 
@@ -359,7 +359,7 @@ export default function GoalPlansPanel({ focusActionId }: { focusActionId?: stri
             <h4>近期行动</h4>
             {plan.nextActions.length ? <ul className="goal-actions">{plan.nextActions.map(action => <li key={action.id}><span>{action.specificity === 'concrete' ? '具体' : '待细化'}</span><div><strong>{action.title || '未命名行动'}</strong>{action.details && <small>{action.details}</small>}</div>{action.estimateMinutes && <em>{action.estimateMinutes} 分钟</em>}</li>)}</ul> : <p className="goal-empty-inline">尚未添加近期行动。</p>}
           </div>
-          <p className="goal-edit-hint">可在 pi 中继续对话修改这份草稿；确认前不会安排行动。</p>
+          <p className="goal-edit-hint">这是演示草稿；确认前不会安排行动。</p>
           {renderHistory(plan)}
         </article>
       ))}
