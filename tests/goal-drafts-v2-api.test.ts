@@ -10,15 +10,23 @@ import { POST as confirmDraft } from '../app/api/v2/goal-drafts/[id]/confirm/rou
 import { GET as listGoals } from '../app/api/v2/goals/route';
 import { GET as getGoal } from '../app/api/v2/goals/[id]/route';
 
-const { proposeGoalDraft } = vi.hoisted(() => ({ proposeGoalDraft: vi.fn() }));
+const { proposeGoalDraft, proposeWeeklyPlan } = vi.hoisted(() => ({ proposeGoalDraft: vi.fn(), proposeWeeklyPlan: vi.fn() }));
 vi.mock('../lib/goal-draft-agent', () => ({ proposeGoalDraft }));
+vi.mock('../lib/weekly-plan-agent', () => ({ proposeWeeklyPlan }));
 
 const directory = mkdtempSync(join(tmpdir(), 'buildyourself-v2-goal-drafts-'));
 beforeEach(() => {
   process.env.BUILDYOURSELF_DB = join(directory, `${randomUUID()}.sqlite`);
+  proposeWeeklyPlan.mockClear();
   proposeGoalDraft.mockImplementation(async ({ message }: { message: string }) => message === '我想学英语'
     ? { reply: '你希望通过什么可观察的结果判断目标达成？', draft: { clarifyingQuestions: ['你希望通过什么可观察的结果判断目标达成？'] } }
     : { reply: '我整理了目标草稿，请核对名称、约束和属性。', draft: readyProposal });
+  proposeWeeklyPlan.mockImplementation(async ({ weekStart, goals }: {
+    weekStart: string; goals: Array<{ id: string; attributes: Array<{ id: string }> }>;
+  }) => ({ reply: '已生成首周规划。', actions: [{
+    title: '准备英文介绍', description: '练习英文项目介绍。', date: weekStart,
+    goalIds: goals.map(goal => goal.id), attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)),
+  }] }));
 });
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
@@ -84,7 +92,8 @@ describe('v0.2 目标草稿 HTTP API', () => {
     const detail = await (await getGoal(new Request('http://localhost'), params(goal.id))).json();
 
     expect(confirmed.status).toBe(201);
-    expect(weeklyPlanGeneration).toEqual({ status: 'not_implemented' });
+    expect(weeklyPlanGeneration.status).toBe('ready');
+    expect(weeklyPlanGeneration.plan.actions).toHaveLength(1);
     expect(goals.goals).toHaveLength(1);
     expect(detail.goal).toMatchObject({
       id: goal.id, title: readyProposal.title, state: 'enabled',

@@ -1,18 +1,30 @@
-import { GoalDraftError, confirmGoalDraft } from '../../../../../../lib/goal-drafts-v2';
+import { confirmGoalDraft } from '../../../../../../lib/goal-drafts-v2';
+import { currentWeekStart, generateWeeklyPlanForGoal, getWeeklyPlanForGoal } from '../../../../../../lib/weekly-plans-v2';
+import { apiError } from '../../../api-error';
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
     const body = await request.json() as { revision?: unknown };
     const result = confirmGoalDraft(id, body.revision);
+    const weekStart = currentWeekStart();
+    let snapshot = getWeeklyPlanForGoal(result.goal.id, weekStart);
+    if (!result.idempotent || snapshot.generation.status === 'not_started') {
+      try {
+        await generateWeeklyPlanForGoal(result.goal.id, weekStart);
+      } catch {
+        // The enabled goal remains valid; the durable generation record exposes the failure and retry path.
+      }
+      snapshot = getWeeklyPlanForGoal(result.goal.id, weekStart);
+    }
     return Response.json({
       goal: result.goal,
-      weeklyPlanGeneration: { status: 'not_implemented' },
+      weeklyPlanGeneration: {
+        ...snapshot.generation,
+        ...(snapshot.plan ? { plan: snapshot.plan } : {}),
+      },
     }, { status: result.idempotent ? 200 : 201 });
   } catch (error) {
-    if (error instanceof GoalDraftError) {
-      return Response.json({ error: error.message, ...(error.issues ? { issues: error.issues } : {}) }, { status: error.status });
-    }
-    return Response.json({ error: error instanceof Error ? error.message : '无法启用目标' }, { status: 400 });
+    return apiError(error, '无法启用目标');
   }
 }
