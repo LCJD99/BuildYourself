@@ -23,6 +23,7 @@ function runPi(prompt: string): Promise<string> {
   const model = process.env.BUILDYOURSELF_AGENT_MODEL;
   const args = [
     '--print', '--mode', 'text', '--no-session', '--no-tools', '--no-extensions', '--no-mcp', '--no-skills',
+    '--no-context-files', '--no-prompt-templates',
   ];
   if (model) args.push('--model', model);
   args.push('--thinking', 'minimal', '--system-prompt', systemPrompt, '--', prompt);
@@ -67,36 +68,71 @@ function parseAgentResult(stdout: string): GoalDraftAgentResult {
     ? body.draft as Record<string, unknown>
     : {};
   const rawQuestions = draft.clarifyingQuestions ?? body.clarifyingQuestions;
-  const questions = Array.isArray(rawQuestions)
-    ? rawQuestions.map(question => typeof question === 'string'
-      ? question
-      : question && typeof question === 'object' && typeof (question as Record<string, unknown>).question === 'string'
-        ? (question as Record<string, unknown>).question as string
-        : null).filter((question): question is string => question !== null)
+  const parsedQuestions = Array.isArray(rawQuestions)
+    ? rawQuestions.map(question => {
+      if (typeof question === 'string') return question.trim() || null;
+      if (!question || typeof question !== 'object' || Array.isArray(question)) return null;
+      const record = question as Record<string, unknown>;
+      return typeof record.question === 'string' ? record.question.trim() || null : null;
+    })
     : null;
-  if (!questions) throw new GoalDraftError('PI Agent 必须返回待澄清问题列表。', 502);
+  if (!parsedQuestions) throw new GoalDraftError('PI Agent 必须返回待澄清问题列表。', 502);
+  if (parsedQuestions.some(question => question === null)) {
+    throw new GoalDraftError('PI Agent 的澄清问题列表含无法识别或为空的条目。', 502);
+  }
+  const questions = parsedQuestions as string[];
 
   const rawConstraints = draft.constraints;
   let constraints: GoalDraftProposal['constraints'];
   if (rawConstraints === undefined) {
     constraints = undefined;
   } else if (Array.isArray(rawConstraints)) {
+    const items = rawConstraints.map(item => {
+      if (typeof item === 'string') return item.trim() || null;
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const record = item as Record<string, unknown>;
+        const keys = Object.keys(record);
+        if (keys.length !== 1 || !['item', 'description', 'text'].includes(keys[0])) return null;
+        const value = record[keys[0]];
+        return typeof value === 'string' && value.trim() ? value.trim() : null;
+      }
+      return null;
+    });
+    if (items.some(item => item === null)) throw new GoalDraftError('PI Agent 的约束列表含无法识别或为空的条目。', 502);
     constraints = {
       status: 'needs_clarification',
-      items: rawConstraints.map(item => typeof item === 'string'
-        ? item
-        : item && typeof item === 'object'
-          ? ['item', 'description', 'text'].map(key => (item as Record<string, unknown>)[key]).find(value => typeof value === 'string') as string | undefined ?? ''
-          : '').filter(Boolean),
+      items: items as string[],
     };
   } else if (rawConstraints && typeof rawConstraints === 'object') {
     const record = rawConstraints as Record<string, unknown>;
+    if (record.status !== undefined && record.status !== 'confirmed' && record.status !== 'needs_clarification') {
+      throw new GoalDraftError('PI Agent 返回了无法识别的约束状态。', 502);
+    }
+    const supportedFields = new Set(['status', 'items', 'must', 'prefer', 'avoid']);
+    if (Object.keys(record).some(key => !supportedFields.has(key))) {
+      throw new GoalDraftError('PI Agent 的约束对象含无法识别的字段。', 502);
+    }
+    const items: string[] = [];
+    if (record.items !== undefined) {
+      if (!Array.isArray(record.items)) throw new GoalDraftError('PI Agent 的约束项必须是列表。', 502);
+      const values = record.items.map(item => typeof item === 'string' && item.trim() ? item.trim() : null);
+      if (values.some(item => item === null)) throw new GoalDraftError('PI Agent 的约束项含无法识别或为空的条目。', 502);
+      items.push(...values as string[]);
+    }
+    for (const field of ['must', 'prefer', 'avoid'] as const) {
+      const group = record[field];
+      if (group === undefined) continue;
+      if (!Array.isArray(group)) throw new GoalDraftError(`PI Agent 的 ${field} 约束必须是列表。`, 502);
+      const values = group.map(item => typeof item === 'string' && item.trim() ? item.trim() : null);
+      if (values.some(item => item === null)) throw new GoalDraftError(`PI Agent 的 ${field} 约束含无法识别或为空的条目。`, 502);
+      items.push(...(values as string[]).map(item => `${field}: ${item}`));
+    }
     constraints = {
       status: record.status === 'confirmed' ? 'confirmed' : 'needs_clarification',
-      items: Array.isArray(record.items) ? record.items.filter((item): item is string => typeof item === 'string') : [],
+      items,
     };
   } else {
-    constraints = { status: 'needs_clarification', items: [] };
+    throw new GoalDraftError('PI Agent 返回的约束格式无法识别。', 502);
   }
 
   const attributes = Array.isArray(draft.attributes)

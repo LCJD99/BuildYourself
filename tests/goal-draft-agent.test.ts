@@ -51,6 +51,8 @@ describe('v0.2 目标澄清 PI 适配器', () => {
     expect(args).toContain('--no-extensions');
     expect(args).toContain('--no-mcp');
     expect(args).toContain('--no-skills');
+    expect(args).toContain('--no-context-files');
+    expect(args).toContain('--no-prompt-templates');
     expect(args).toContain('magpie/auto/auto');
     expect(options).toMatchObject({ encoding: 'utf8', timeout: 60_000 });
     expect(JSON.parse(String(args.at(-1)))).toMatchObject({
@@ -67,7 +69,7 @@ describe('v0.2 目标澄清 PI 适配器', () => {
 
     provide(JSON.stringify({ reply: '确认一下', draft: { attributes: [] } }));
     await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
-      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('待澄清问题列表') });
+      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('澄清问题') });
   });
 
   it('规范化 PI 返回的代码围栏及常见字段变体', async () => {
@@ -82,6 +84,46 @@ describe('v0.2 目标澄清 PI 适配器', () => {
       attributes: [{ name: '当前水平', description: '当前水平：未知' }],
       clarifyingQuestions: ['希望用英语完成什么？'],
     });
+  });
+
+  it('拒绝无法识别的澄清问题，避免把待澄清项静默变为空列表', async () => {
+    provide(JSON.stringify({
+      reply: '请继续补充。',
+      draft: { clarifyingQuestions: [{ prompt: '还需要什么结果？' }] },
+    }));
+
+    await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
+      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('澄清问题') });
+  });
+
+  it('拒绝无法识别的约束条目，避免确认时丢失用户限制', async () => {
+    provide(JSON.stringify({
+      reply: '目标草稿已完整。',
+      draft: {
+        title: '学习英语', description: '完成英文项目介绍。',
+        constraints: { status: 'confirmed', items: [{ deadline: '2027-02-01' }] },
+        attributes: [{ name: '口语表达', description: '英文表达清晰度' }],
+        clarifyingQuestions: [],
+      },
+    }));
+
+    await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
+      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('约束') });
+  });
+
+  it('拒绝带有无法识别字段的约束对象，避免静默丢弃约束细节', async () => {
+    provide(JSON.stringify({
+      reply: '目标草稿已完整。',
+      draft: {
+        title: '学习英语', description: '完成英文项目介绍。',
+        constraints: [{ item: '每周练习三次', deadline: '三个月' }],
+        attributes: [{ name: '口语表达', description: '英文表达清晰度' }],
+        clarifyingQuestions: [],
+      },
+    }));
+
+    await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
+      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('约束') });
   });
 
   it('把未安装命令与模型超时映射成可诊断的服务错误', async () => {
