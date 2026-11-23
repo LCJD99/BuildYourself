@@ -112,6 +112,9 @@ function parseAgentResult(stdout: string): GoalDraftAgentResult {
     if (Object.keys(record).some(key => !supportedFields.has(key))) {
       throw new GoalDraftError('PI Agent 的约束对象含无法识别的字段。', 502);
     }
+    if (!['items', 'must', 'prefer', 'avoid'].some(field => Object.hasOwn(record, field))) {
+      throw new GoalDraftError('PI Agent 的约束对象缺少约束内容字段。', 502);
+    }
     const items: string[] = [];
     if (record.items !== undefined) {
       if (!Array.isArray(record.items)) throw new GoalDraftError('PI Agent 的约束项必须是列表。', 502);

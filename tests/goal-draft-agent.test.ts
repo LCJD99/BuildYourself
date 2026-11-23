@@ -126,6 +126,21 @@ describe('v0.2 目标澄清 PI 适配器', () => {
       .rejects.toMatchObject({ status: 502, message: expect.stringContaining('约束') });
   });
 
+  it('拒绝仅带状态的约束对象，避免误清空现有约束', async () => {
+    provide(JSON.stringify({
+      reply: '目标约束已确认。',
+      draft: {
+        title: '学习英语', description: '完成英文项目介绍。',
+        constraints: { status: 'confirmed' },
+        attributes: [{ name: '口语表达', description: '英文表达清晰度' }],
+        clarifyingQuestions: [],
+      },
+    }));
+
+    await expect(proposeGoalDraft({ message: '确认这些限制', transcript: [], currentDraft: null }))
+      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('约束') });
+  });
+
   it('把未安装命令与模型超时映射成可诊断的服务错误', async () => {
     const missingCommand = Object.assign(new Error('spawn pi ENOENT'), { code: 'ENOENT' });
     provide('', missingCommand);
