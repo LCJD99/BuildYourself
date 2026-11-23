@@ -79,11 +79,12 @@ describe('v0.2 目标草稿 HTTP API', () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ revision: updated.revision }),
     }), params(first.id));
-    const { goal } = await confirmed.json();
+    const { goal, weeklyPlanGeneration } = await confirmed.json();
     const goals = await (await listGoals()).json();
     const detail = await (await getGoal(new Request('http://localhost'), params(goal.id))).json();
 
     expect(confirmed.status).toBe(201);
+    expect(weeklyPlanGeneration).toEqual({ status: 'not_implemented' });
     expect(goals.goals).toHaveLength(1);
     expect(detail.goal).toMatchObject({
       id: goal.id, title: readyProposal.title, state: 'enabled',

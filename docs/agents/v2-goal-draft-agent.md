@@ -1,14 +1,14 @@
 # v0.2 目标澄清 Agent 服务
 
-`POST /api/v2/goal-drafts` 和 `POST /api/v2/goal-drafts/{id}/messages` 在保存目标草稿前调用服务端 Agent。应用通过 `BUILDYOURSELF_AGENT_URL` 指定 Agent HTTP 端点；可选的 `BUILDYOURSELF_AGENT_TOKEN` 会以 Bearer token 发送。
+`POST /api/v2/goal-drafts` 和 `POST /api/v2/goal-drafts/{id}/messages` 在保存目标草稿前通过 Node.js `execFile` 调用本机 PI CLI。应用复用 PI 已配置的 provider 和认证；可通过 `BUILDYOURSELF_PI_BIN` 指定命令路径，通过 `BUILDYOURSELF_AGENT_MODEL` 选择模型。Next.js 服务进程必须能访问 PI CLI，并使用已完成认证的 PI 配置目录。
 
-应用以 JSON POST 请求调用该端点：
+应用通过无工具、无扩展、无 MCP、无会话的非交互 PI 调用发送 JSON 上下文：
 
 ```json
 {
   "task": "clarify_goal",
-  "message": "希望三个月后能做英文项目介绍。",
-  "transcript": [{ "role": "user", "message": "我想学英语" }],
+  "latestMessage": "希望三个月后能做英文项目介绍。",
+  "conversation": [{ "role": "user", "message": "我想学英语" }],
   "currentDraft": null
 }
 ```
@@ -28,6 +28,6 @@
 }
 ```
 
-端点不可用、超时或返回无效内容时，业务 API 返回错误且不保存该轮草稿。`BUILDYOURSELF_AGENT_URL` 未设置时返回 `503`。应用验证返回字段后才持久化；浏览器提交的 `agentDraft` 字段不会被采纳。
+PI 命令缺失、模型超时或返回无效内容时，业务 API 返回可诊断错误且不保存该轮草稿。模型必须只返回一个 JSON 对象；应用验证其字段后才持久化。PI 只收到保存的自然语言对话和草稿，不提供工具，也不会写入 PI 会话文件。浏览器提交的 `agentDraft` 字段不会被采纳。
 
-仓库现有 `pi/goal.js` 是 PI 运行时中的旧目标规划工具，它调用 `/api/goal-plans`，并不是这个服务端 HTTP 协议的实现。当前仓库没有提供兼容的 v0.2 Agent 服务或 bridge；启用 v0.2 澄清流程前需要配置实现上述请求/响应契约的服务。API 测试以受控 Agent 结果验证持久化和确认边界，不能替代真实 Agent 联调。
+仓库现有 `pi/goal.js` 仍是调用 `/api/goal-plans` 的旧目标规划工具，不会直接编排 v0.2 草稿路由。v0.2 API 自己通过 PI CLI 调用已配置模型，并把每轮对话作为上下文传入；它不复用正在运行的 TUI 会话。目标确认响应中的 `weeklyPlanGeneration.status` 当前为 `not_implemented`；首周规划接入前不会生成。自动化 API 测试使用可控 PI 命令替身，真实 PI 配置下的多轮 HTTP 烟测应单独运行。

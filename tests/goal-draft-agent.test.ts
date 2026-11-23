@@ -1,57 +1,93 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { execFile } = vi.hoisted(() => ({ execFile: vi.fn() }));
+vi.mock('node:child_process', () => ({ execFile }));
+
 import { proposeGoalDraft } from '../lib/goal-draft-agent';
 
-afterEach(() => {
-  delete process.env.BUILDYOURSELF_AGENT_URL;
-  delete process.env.BUILDYOURSELF_AGENT_TOKEN;
-  vi.unstubAllGlobals();
+const validOutput = JSON.stringify({
+  reply: '你希望通过什么可观察的结果判断目标达成？',
+  draft: {
+    title: '', description: '',
+    constraints: { status: 'needs_clarification', items: [] },
+    attributes: [], clarifyingQuestions: ['你希望通过什么可观察的结果判断目标达成？'],
+  },
 });
 
-describe('v0.2 目标澄清 Agent 适配器', () => {
-  it('未配置服务端 Agent 时明确返回服务不可用', async () => {
-    await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
-      .rejects.toMatchObject({ status: 503, message: expect.stringContaining('BUILDYOURSELF_AGENT_URL') });
-  });
+function provide(stdout: string, error?: NodeJS.ErrnoException) {
+  execFile.mockImplementation((_command, _args, _options, callback) => callback(error ?? null, stdout, ''));
+}
 
-  it('将对话与当前草稿发给服务端 Agent，并校验结构化返回', async () => {
-    process.env.BUILDYOURSELF_AGENT_URL = 'http://agent.internal/clarify';
-    process.env.BUILDYOURSELF_AGENT_TOKEN = 'local';
-    const fetchMock = vi.fn(async (_url: URL, _options: RequestInit) => new Response(JSON.stringify({
-      reply: '请核对目标草稿。',
-      draft: {
-        title: '提升英语表达能力',
-        description: '能够完成英文项目介绍。',
-        constraints: { status: 'confirmed', items: ['每周练习三次'] },
-        attributes: [{ name: '口语表达', description: '表达清晰度' }],
-        clarifyingQuestions: [],
-      },
-    }), { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
+beforeEach(() => {
+  delete process.env.BUILDYOURSELF_PI_BIN;
+  delete process.env.BUILDYOURSELF_AGENT_MODEL;
+  execFile.mockReset();
+});
+afterEach(() => vi.unstubAllGlobals());
+
+describe('v0.2 目标澄清 PI 适配器', () => {
+  it('以无工具、无会话模式向配置的 PI 命令发送多轮上下文，并校验 JSON 返回', async () => {
+    process.env.BUILDYOURSELF_PI_BIN = '/opt/homebrew/bin/pi';
+    process.env.BUILDYOURSELF_AGENT_MODEL = 'magpie/auto/auto';
+    provide(validOutput);
 
     const result = await proposeGoalDraft({
-      message: '希望三个月后能做英文项目介绍。',
+      message: '我想学英语',
       transcript: [{ role: 'user', message: '我想学英语' }],
       currentDraft: null,
     });
 
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0][0].toString()).toBe('http://agent.internal/clarify');
-    const options = fetchMock.mock.calls[0][1];
-    expect(options.headers).toMatchObject({ Authorization: 'Bearer local' });
-    expect(JSON.parse(String(options.body))).toMatchObject({
-      task: 'clarify_goal', message: '希望三个月后能做英文项目介绍。',
-      transcript: [{ role: 'user', message: '我想学英语' }], currentDraft: null,
+    expect(execFile).toHaveBeenCalledOnce();
+    const [command, args, options] = execFile.mock.calls[0];
+    expect(command).toBe('/opt/homebrew/bin/pi');
+    expect(args).toContain('--print');
+    expect(args).toContain('--no-session');
+    expect(args).toContain('--no-tools');
+    expect(args).toContain('--no-extensions');
+    expect(args).toContain('--no-mcp');
+    expect(args).toContain('--no-skills');
+    expect(args).toContain('magpie/auto/auto');
+    expect(options).toMatchObject({ encoding: 'utf8', timeout: 60_000 });
+    expect(JSON.parse(String(args.at(-1)))).toMatchObject({
+      task: 'clarify_goal', latestMessage: '我想学英语',
+      conversation: [{ role: 'user', message: '我想学英语' }], currentDraft: null,
     });
-    expect(result).toMatchObject({
-      reply: '请核对目标草稿。', draft: { title: '提升英语表达能力', clarifyingQuestions: [] },
+    expect(result).toMatchObject({ reply: '你希望通过什么可观察的结果判断目标达成？' });
+  });
+
+  it('拒绝非 JSON 或缺少必要字段的模型响应', async () => {
+    provide('```json\n{}\n```');
+    await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
+      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('reply 和 draft') });
+
+    provide(JSON.stringify({ reply: '确认一下', draft: { attributes: [] } }));
+    await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
+      .rejects.toMatchObject({ status: 502, message: expect.stringContaining('待澄清问题列表') });
+  });
+
+  it('规范化 PI 返回的代码围栏及常见字段变体', async () => {
+    provide(`\`\`\`json
+      {"reply":"需要继续澄清。","draft":{"title":"学英语","description":"待明确结果。","constraints":[],"attributes":[{"name":"当前水平","value":"未知"}],"clarifyingQuestions":[{"question":"希望用英语完成什么？","priority":"high"}]}}
+      \`\`\``);
+
+    const result = await proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null });
+
+    expect(result.draft).toMatchObject({
+      constraints: { status: 'needs_clarification', items: [] },
+      attributes: [{ name: '当前水平', description: '当前水平：未知' }],
+      clarifyingQuestions: ['希望用英语完成什么？'],
     });
   });
 
-  it('拒绝无效的服务端返回，避免持久化不完整响应', async () => {
-    process.env.BUILDYOURSELF_AGENT_URL = 'http://agent.internal/clarify';
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ reply: '请确认', draft: { attributes: 'not-a-list' } }), { status: 200 })));
-
+  it('把未安装命令与模型超时映射成可诊断的服务错误', async () => {
+    const missingCommand = Object.assign(new Error('spawn pi ENOENT'), { code: 'ENOENT' });
+    provide('', missingCommand);
     await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
-      .rejects.toMatchObject({ status: 502 });
+      .rejects.toMatchObject({ status: 503, message: expect.stringContaining('BUILDYOURSELF_PI_BIN') });
+
+    const timeout = Object.assign(new Error('timeout'), { killed: true, code: 'ETIMEDOUT' });
+    provide('', timeout);
+    await expect(proposeGoalDraft({ message: '我想学英语', transcript: [], currentDraft: null }))
+      .rejects.toMatchObject({ status: 504, message: expect.stringContaining('超时') });
   });
 });

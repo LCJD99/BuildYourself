@@ -7,7 +7,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const result = confirmGoalDraft(id, body.revision);
     return Response.json({
       goal: result.goal,
-      weeklyPlanGeneration: { status: 'pending' },
+      weeklyPlanGeneration: { status: 'not_implemented' },
     }, { status: result.idempotent ? 200 : 201 });
   } catch (error) {
     if (error instanceof GoalDraftError) {
