@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,7 @@ import { activateGoalPlan, saveGoalPlanDraft } from '../lib/goal-plans';
 
 const dir = mkdtempSync(join(tmpdir(), 'buildyourself-weekly-review-api-'));
 beforeEach(() => { process.env.BUILDYOURSELF_DB = join(dir, `${randomUUID()}.sqlite`); });
+afterEach(() => vi.useRealTimers());
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('周复盘 API', () => {
@@ -43,6 +44,10 @@ describe('周复盘 API', () => {
   });
 
   it('确认已保存建议后返回关联到里程碑的待排任务', async () => {
+    const weekStart = '2026-11-09';
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(`${weekStart}T12:00:00.000Z`));
+
     const draft = saveGoalPlanDraft({
       sourceIntent: '改善响应延迟', title: '改善响应延迟', domain: 'project',
       domainTemplate: { id: 'project', version: '1.0.0' }, context: '性能验证',
@@ -57,7 +62,6 @@ describe('周复盘 API', () => {
       reviewCycleDays: 7,
     });
     activateGoalPlan(draft.id, { confirmed: true, reviewedAt: draft.updatedAt });
-    const weekStart = '2026-11-09';
     const reviewResponse = GET(new Request(`http://localhost/api/weekly-review?weekStart=${weekStart}&timeZone=UTC`));
     const review = await reviewResponse.json();
     const saveResponse = await PUT(new Request('http://localhost/api/weekly-review', {
