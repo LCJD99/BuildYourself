@@ -10,7 +10,7 @@ export type ActionAssessmentResult = {
   contributions: Array<{ attributeId: string; amount: number }>;
 };
 
-const systemPrompt = `你评估用户对一项已安排行动的自然语言反馈。只返回一个 JSON 对象，不要 Markdown：{"completion":0到1之间的数,"confidence":0到1之间的数,"reply":"简短中文反馈","contributions":[{"attributeId":"输入中的目标属性 ID","amount":0到1之间的数}]}。completion 表示截至当前这项行动的累计完成度；confidence 表示对本次判断的把握程度，不评价用户诚信。contributions 中的 amount 是在该项行动完整完成且评估有把握时，对所列目标属性的累计预期贡献基数；按用户反馈更新累计判断，不要重复提交之前已经累计的贡献。只能使用输入行动实际关联的属性 ID，不得臆造 ID。允许部分完成，若没有可确认的贡献可返回空列表。`;
+const systemPrompt = `你评估用户对一项已安排行动的反馈，或评估用户计划外做的事情是否推进了其长期目标。只返回一个 JSON 对象，不要 Markdown：{"completion":0到1之间的数,"confidence":0到1之间的数,"reply":"简短中文反馈","contributions":[{"attributeId":"输入中的目标属性 ID","amount":0到1之间的数}]}。completion 表示行动完成情况；confidence 表示对本次判断的把握程度，不评价用户诚信。对计划外事情，只有在确实有目标属性收益时才返回贡献；没有明确收益就返回空列表。contributions 中的 amount 是对所列属性的累计预期贡献基数；按用户反馈评估，不得臆造输入中不存在的属性 ID。允许部分完成。`;
 
 function runPi(prompt: string): Promise<string> {
   const command = process.env.BUILDYOURSELF_PI_BIN || 'pi';
@@ -87,7 +87,9 @@ export async function proposeActionAssessment(input: {
   message: string;
   performedOn: string | null;
   priorCumulativeContributions: Record<string, number>;
+  unplanned?: boolean;
 }): Promise<ActionAssessmentResult> {
-  const prompt = JSON.stringify({ task: 'assess_planned_action_feedback', ...input });
+  const { unplanned = false, ...assessmentInput } = input;
+  const prompt = JSON.stringify({ task: unplanned ? 'assess_unplanned_activity' : 'assess_planned_action_feedback', ...assessmentInput });
   return validateActionAssessment(normalizedJson(await runPi(prompt)), input.action);
 }

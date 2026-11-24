@@ -9,6 +9,8 @@ import { POST as confirmWeeklyPlan } from '../app/api/v2/weekly-plans/[id]/confi
 import { POST as submitFeedback } from '../app/api/v2/action-feedback/route';
 import { GET as getFeedback } from '../app/api/v2/action-feedback/[id]/route';
 import { GET as getAttributeContributions } from '../app/api/v2/goals/[id]/attributes/[attributeId]/contributions/route';
+import { POST as submitUnplannedFeedback } from '../app/api/v2/unplanned-feedback/route';
+import { GET as getCalendarDay } from '../app/api/v2/calendar/days/[date]/route';
 
 const liveAgentSmoke = process.env.RUN_PI_AGENT_SMOKE === '1' ? describe : describe.skip;
 
@@ -16,6 +18,7 @@ liveAgentSmoke('真实 PI Agent 计划内行动反馈 HTTP 烟测', () => {
   const directory = mkdtempSync(join(tmpdir(), 'buildyourself-live-action-feedback-'));
   const originalDatabase = process.env.BUILDYOURSELF_DB;
   const params = (id: string) => ({ params: Promise.resolve({ id }) });
+  const dayParams = (date: string) => ({ params: Promise.resolve({ date }) });
 
   beforeAll(() => { process.env.BUILDYOURSELF_DB = join(directory, `${randomUUID()}.sqlite`); });
   afterAll(() => {
@@ -79,6 +82,46 @@ liveAgentSmoke('真实 PI Agent 计划内行动反馈 HTTP 烟测', () => {
           revision: draft.revision,
           message: '这是已经核对的目标：三个月后能独立进行10分钟英文项目介绍并回答工作常见问题。评价属性为口语表达和回答问题的清晰度。每周练习三次，每次30分钟。约束已确认，没有待澄清问题。',
         }),
+      }), params(draft.id));
+      expect(reply.status, JSON.stringify(await reply.clone().json())).toBe(200);
+      draft = (await reply.json()).draft;
+    }
+    throw new Error('PI 模型未能生成可确认目标');
+  }, 300_000);
+
+  it('调用真实模型评估计划外反馈并按实际发生日期记录', async () => {
+    const created = await createDraft(new Request('http://localhost/api/v2/goal-drafts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: '我想提升英语表达能力。' }),
+    }));
+    expect(created.status, JSON.stringify(await created.clone().json())).toBe(201);
+    let draft = (await created.json()).draft;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const confirmedGoal = await confirmGoal(new Request(`http://localhost/api/v2/goal-drafts/${draft.id}/confirm`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision: draft.revision }),
+      }), params(draft.id));
+      if (confirmedGoal.status === 201) {
+        const performedOn = new Date().toISOString().slice(0, 10);
+        const response = await submitUnplannedFeedback(new Request('http://localhost/api/v2/unplanned-feedback', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: '今天临时用英语向同事介绍了项目。', performedOn, idempotencyKey: randomUUID() }),
+        }));
+        expect(response.status, JSON.stringify(await response.clone().json())).toBe(201);
+        const result = await response.json();
+        expect(['action', 'misc']).toContain(result.kind);
+        expect(result.feedback.performedOn).toBe(performedOn);
+        if (result.kind === 'action') {
+          const calendar = await getCalendarDay(new Request('http://localhost'), dayParams(performedOn));
+          expect((await calendar.json()).actions).toContainEqual(expect.objectContaining({
+            actionId: result.feedback.actionId, source: 'unplanned', scheduledDate: performedOn,
+          }));
+        }
+        return;
+      }
+      await confirmedGoal.json();
+      expect(confirmedGoal.status).toBe(422);
+      const reply = await (await import('../app/api/v2/goal-drafts/[id]/messages/route')).POST(new Request(`http://localhost/api/v2/goal-drafts/${draft.id}/messages`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision: draft.revision, message: '这是已经核对的目标：三个月后能独立进行10分钟英文项目介绍。评价属性为口语表达和回答问题的清晰度。每周练习三次，每次30分钟。约束已确认，没有待澄清问题。' }),
       }), params(draft.id));
       expect(reply.status, JSON.stringify(await reply.clone().json())).toBe(200);
       draft = (await reply.json()).draft;

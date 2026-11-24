@@ -12,6 +12,9 @@ import { GET as getAction } from '../app/api/v2/actions/[id]/route';
 import { GET as getGoal } from '../app/api/v2/goals/[id]/route';
 import { GET as getAttributeContributions } from '../app/api/v2/goals/[id]/attributes/[attributeId]/contributions/route';
 import { getLatestActionCompletionByIds } from '../lib/action-feedback-v2';
+import { POST as submitUnplanned } from '../app/api/v2/unplanned-feedback/route';
+import { GET as getCalendarDay } from '../app/api/v2/calendar/days/[date]/route';
+import { GET as getCalendarMonth } from '../app/api/v2/calendar/months/[month]/route';
 
 const { proposeGoalDraft, proposeWeeklyPlan, proposeActionAssessment } = vi.hoisted(() => ({
   proposeGoalDraft: vi.fn(),
@@ -232,5 +235,67 @@ describe('v0.2 计划内行动反馈 HTTP API', () => {
   it('空结果和从未反馈的行动可安全查询完成度', () => {
     expect(getLatestActionCompletionByIds([])).toEqual({});
     expect(getLatestActionCompletionByIds(['missing-action'])).toEqual({ 'missing-action': null });
+  });
+
+  it('计划外有收益时按实际日期保存为行动、增加属性贡献并显示在日历', async () => {
+    const { goal } = await createConfirmedPlannedAction();
+    const performedOn = '2026-11-20';
+    proposeActionAssessment.mockImplementationOnce(async ({ action }: { action: { attributeIds: string[] } }) => ({
+      completion: 0.5, confidence: 0.8, reply: '这次练习提升了表达。',
+      contributions: [{ attributeId: action.attributeIds[0], amount: 0.6 }],
+    }));
+    const requestBody = { message: '临时练习了英文演讲。', idempotencyKey: 'unplanned-gain', performedOn };
+    const request = (body: typeof requestBody) => submitUnplanned(new Request('http://localhost/api/v2/unplanned-feedback', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }));
+    const response = await request(requestBody);
+    const result = await response.json();
+    expect(response.status).toBe(201);
+    expect(result.kind).toBe('action');
+    const retry = await request(requestBody);
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).feedback.id).toBe(result.feedback.id);
+    expect((await request({ ...requestBody, message: '不同的反馈。' })).status).toBe(409);
+    expect(proposeActionAssessment).toHaveBeenCalledOnce();
+    expect(proposeActionAssessment.mock.calls.at(-1)?.[0].unplanned).toBe(true);
+    expect(result.feedback.performedOn).toBe(performedOn);
+    expect(result.feedback.contributions[0].amount).toBeCloseTo(0.24, 10);
+    const calendar = await getCalendarDay(new Request('http://localhost'), params({ date: performedOn }));
+    expect((await calendar.json()).actions).toContainEqual(expect.objectContaining({
+      actionId: result.feedback.actionId, source: 'unplanned', scheduledDate: performedOn,
+    }));
+    const month = await getCalendarMonth(new Request('http://localhost'), params({ month: performedOn.slice(0, 7) }));
+    expect((await month.json()).dates).toContain(performedOn);
+    const reopened = await getFeedback(new Request('http://localhost'), params({ id: result.feedback.id }));
+    expect((await reopened.json()).feedback.message).toBe('临时练习了英文演讲。');
+  });
+
+  it.each([
+    { completion: 0.5, confidence: 0 },
+    { completion: 0, confidence: 0.9 },
+  ])('计划外无有效贡献时保存为杂项并保持进度不变（$completion/$confidence）', async ({ completion, confidence }) => {
+    const { goal } = await createConfirmedPlannedAction();
+    proposeActionAssessment.mockImplementationOnce(async ({ action }: { action: { attributeIds: string[] } }) => ({
+      completion, confidence, reply: '已记录为杂项。',
+      contributions: [{ attributeId: action.attributeIds[0], amount: 1 }],
+    }));
+    const body = { message: '整理了桌面。', idempotencyKey: 'unplanned-misc', performedOn: '2026-11-21' };
+    const request = () => submitUnplanned(new Request('http://localhost/api/v2/unplanned-feedback', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }));
+    const first = await request(); const firstResult = await first.json();
+    const retry = await request(); const retryResult = await retry.json();
+    expect(firstResult.kind).toBe('misc');
+    expect(retry.status).toBe(200);
+    expect(retryResult.feedback.id).toBe(firstResult.feedback.id);
+    const list = await (await import('../app/api/v2/unplanned-feedback/route')).GET();
+    expect((await list.json()).miscellaneous).toContainEqual(expect.objectContaining({
+      id: firstResult.feedback.id, message: '整理了桌面。', performedOn: '2026-11-21',
+    }));
+    const goalResponse = await getGoal(new Request('http://localhost'), params({ id: goal.id }));
+    const progress = (await goalResponse.json()).goal.attributes
+      .map((attribute: { progress: number }) => attribute.progress);
+    expect(progress).toEqual([0, 0]);
+    expect(proposeActionAssessment).toHaveBeenCalledOnce();
   });
 });

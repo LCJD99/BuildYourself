@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { GoalDraftError, getEnabledGoal, type GoalV2 } from './goal-drafts-v2';
+import { GoalDraftError, getEnabledGoal, listEnabledGoals, type GoalV2 } from './goal-drafts-v2';
 import { openDatabase } from './store';
 import { proposeActionAssessment, type ActionAssessmentResult } from './action-feedback-agent';
 import { findConfirmedPlannedActionInDatabase, getConfirmedPlannedAction, type ConfirmedPlannedAction } from './weekly-plans-v2';
@@ -161,6 +161,110 @@ export function getActionRecord(actionId: string) {
     const row = database.prepare('SELECT action_snapshot_json FROM v2_action_feedback WHERE action_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(actionId) as { action_snapshot_json: string } | undefined;
     const current = findConfirmedPlannedActionInDatabase(database, actionId);
     return { action: current ?? (row ? JSON.parse(row.action_snapshot_json) as ConfirmedPlannedAction : null), feedback };
+  });
+}
+
+function ensureUnplannedSchema(database: DatabaseSync) {
+  ensureSchema(database);
+  database.exec(`CREATE TABLE IF NOT EXISTS v2_unplanned_action_kinds (
+    feedback_id TEXT PRIMARY KEY REFERENCES v2_action_feedback(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('action','misc'))
+  )`);
+}
+
+export function listUnplannedActionsForCalendar(startDate: string, endDate: string): ConfirmedPlannedAction[] {
+  return withDatabase(database => {
+    ensureUnplannedSchema(database);
+    const rows = database.prepare(`SELECT f.action_snapshot_json FROM v2_action_feedback f
+      JOIN v2_unplanned_action_kinds k ON k.feedback_id=f.id
+      WHERE k.kind='action' AND f.performed_on>=? AND f.performed_on<=?
+      ORDER BY f.performed_on,f.created_at`).all(startDate, endDate) as Array<{ action_snapshot_json: string }>;
+    return rows.map(row => JSON.parse(row.action_snapshot_json) as ConfirmedPlannedAction);
+  });
+}
+
+export function listUnplannedMiscellaneous() {
+  return withDatabase(database => {
+    ensureUnplannedSchema(database);
+    return (database.prepare(`SELECT f.id,f.message,f.performed_on,f.completion,f.confidence,f.reply,f.created_at
+      FROM v2_action_feedback f JOIN v2_unplanned_action_kinds k ON k.feedback_id=f.id
+      WHERE k.kind='misc' ORDER BY f.created_at DESC`).all() as Array<Record<string, unknown>>).map(row => ({
+      id: String(row.id), message: String(row.message), performedOn: String(row.performed_on),
+      submittedAt: String(row.created_at),
+      assessment: { completion: Number(row.completion), confidence: Number(row.confidence), reply: String(row.reply) },
+    }));
+  });
+}
+
+export async function submitUnplannedActionFeedback(input: {
+  message: unknown; idempotencyKey: unknown; performedOn: unknown;
+}) {
+  if (typeof input.message !== 'string' || !input.message.trim()) throw new GoalDraftError('请填写计划外反馈。', 400);
+  if (typeof input.idempotencyKey !== 'string' || !input.idempotencyKey.trim()) throw new GoalDraftError('请提供有效的重试标识。', 400);
+  const performedOn = validPerformedOn(input.performedOn);
+  if (!performedOn) throw new GoalDraftError('请提供实际发生日期。', 400);
+  const message = input.message;
+  const idempotencyKey = input.idempotencyKey.trim();
+  const actionId = randomUUID();
+  const goals = listEnabledGoals();
+  const candidate: ConfirmedPlannedAction = {
+    id: actionId, title: message.trim().slice(0, 100), description: message,
+    date: performedOn, goalIds: goals.map(goal => goal.id),
+    attributeIds: goals.flatMap(goal => goal.attributes.map(attribute => attribute.id)), weekStarts: [],
+  };
+  const fingerprint = requestFingerprint(actionId, message, performedOn);
+  const cached = withDatabase(database => {
+    ensureUnplannedSchema(database);
+    const row = database.prepare('SELECT * FROM v2_action_feedback WHERE idempotency_key=?').get(idempotencyKey) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const kindRow = database.prepare('SELECT kind FROM v2_unplanned_action_kinds WHERE feedback_id=?').get(String(row.id)) as { kind: string } | undefined;
+    if (!kindRow) throw new GoalDraftError('重试标识已用于其他行动反馈。', 409);
+    return { feedback: mapFeedback(database, row), kind: kindRow.kind, snapshot: String(row.action_snapshot_json) };
+  });
+  if (cached) {
+    const feedback = withDatabase(database => {
+      const row = database.prepare('SELECT request_fingerprint FROM v2_action_feedback WHERE idempotency_key=?').get(idempotencyKey) as { request_fingerprint: string };
+      if (row.request_fingerprint !== requestFingerprint(String((JSON.parse(cached.snapshot) as ConfirmedPlannedAction).id), message, performedOn)) throw new GoalDraftError('重试标识已用于不同的反馈内容。', 409);
+      return cached.feedback;
+    });
+    return { kind: cached.kind, feedback, idempotent: true };
+  }
+  const assessment = await proposeActionAssessment({ action: candidate, goals, message, performedOn, priorCumulativeContributions: {}, unplanned: true });
+  const contributingAssessments = assessment.contributions.filter(item =>
+    item.amount * assessment.completion * assessment.confidence > 0);
+  const kind = contributingAssessments.length ? 'action' : 'misc';
+  return withDatabase(database => {
+    ensureUnplannedSchema(database);
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const concurrent = database.prepare(`SELECT f.*,k.kind FROM v2_action_feedback f JOIN v2_unplanned_action_kinds k ON k.feedback_id=f.id WHERE f.idempotency_key=?`).get(idempotencyKey) as (Record<string, unknown> & {kind:string}) | undefined;
+      if (concurrent) {
+        if (String(concurrent.message) !== message || String(concurrent.performed_on) !== performedOn) throw new GoalDraftError('重试标识已用于不同的反馈内容。', 409);
+        database.exec('COMMIT'); return { kind: concurrent.kind, feedback: mapFeedback(database, concurrent), idempotent: true };
+      }
+      const keyCollision = database.prepare('SELECT 1 AS present FROM v2_action_feedback WHERE idempotency_key=?').get(idempotencyKey);
+      if (keyCollision) throw new GoalDraftError('重试标识已用于其他行动反馈。', 409);
+      const id = randomUUID(); const createdAt = new Date().toISOString();
+      const contributedAttributeIds = contributingAssessments.map(item => item.attributeId);
+      const action: ConfirmedPlannedAction = { ...candidate,
+        goalIds: goals.filter(goal => goal.attributes.some(attribute => contributedAttributeIds.includes(attribute.id))).map(goal => goal.id),
+        attributeIds: contributedAttributeIds };
+      database.prepare(`INSERT INTO v2_action_feedback
+        (id,idempotency_key,request_fingerprint,action_id,action_snapshot_json,message,performed_on,completion,confidence,reply,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id,idempotencyKey,requestFingerprint(actionId,message,performedOn),actionId,JSON.stringify(action),message,performedOn,assessment.completion,assessment.confidence,assessment.reply,createdAt);
+      database.prepare('INSERT INTO v2_unplanned_action_kinds(feedback_id,kind) VALUES (?,?)').run(id,kind);
+      if (kind === 'action') for (const contribution of contributingAssessments) {
+        const owner = goals.find(goal => goal.attributes.some(attribute => attribute.id === contribution.attributeId));
+        if (!owner) throw new GoalDraftError('Agent 返回了无效的目标属性。', 502);
+        const amount = contribution.amount * assessment.completion * assessment.confidence;
+        if (amount <= 0) continue;
+        database.prepare(`INSERT INTO v2_attribute_contributions(id,feedback_id,action_id,goal_id,attribute_id,amount,cumulative_amount,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+          .run(randomUUID(),id,actionId,owner.id,contribution.attributeId,amount,amount,createdAt);
+        database.prepare('UPDATE v2_goal_attributes SET progress=progress+? WHERE id=? AND goal_id=?').run(amount,contribution.attributeId,owner.id);
+      }
+      const row = database.prepare('SELECT * FROM v2_action_feedback WHERE id=?').get(id) as Record<string,unknown>;
+      const feedback = mapFeedback(database,row); database.exec('COMMIT'); return {kind,feedback,idempotent:false};
+    } catch(error) { database.exec('ROLLBACK'); throw error; }
   });
 }
 

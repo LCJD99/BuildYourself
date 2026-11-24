@@ -1,6 +1,7 @@
 import { GoalDraftError, listEnabledGoals } from './goal-drafts-v2';
 import { listConfirmedWeeklyPlanActions } from './weekly-plans-v2';
 import { getLatestActionCompletionByIds } from './action-feedback-v2';
+import { listUnplannedActionsForCalendar } from './action-feedback-v2';
 import type { WeeklyPlanAction } from './weekly-plan-agent';
 
 const defaultTimeZone = 'Asia/Shanghai';
@@ -16,7 +17,7 @@ export type V2CalendarAction = {
   title: string;
   description: string;
   scheduledDate: string;
-  source: 'planned';
+  source: 'planned' | 'unplanned';
   goals: CalendarGoal[];
   completionFraction: number | null;
 };
@@ -53,7 +54,7 @@ function readConfirmedActions(startDate: string, endDate: string): WeeklyPlanAct
   return listConfirmedWeeklyPlanActions(startDate, endDate);
 }
 
-function dailyActionDetails(actions: WeeklyPlanAction[]): V2CalendarAction[] {
+function dailyActionDetails(actions: WeeklyPlanAction[], unplannedIds: Set<string> = new Set()): V2CalendarAction[] {
   const goalsById = new Map(listEnabledGoals().map(goal => [goal.id, goal]));
   const attributesForAction = (action: WeeklyPlanAction, goalId: string) => {
     const goal = goalsById.get(goalId);
@@ -82,7 +83,7 @@ function dailyActionDetails(actions: WeeklyPlanAction[]): V2CalendarAction[] {
       title: action.title,
       description: action.description,
       scheduledDate: action.date,
-      source: 'planned',
+      source: unplannedIds.has(action.id) ? 'unplanned' : 'planned',
       goals: visibleGoals,
       // Date-only plans have no assessment until the feedback API records one.
       completionFraction: null,
@@ -101,11 +102,16 @@ export function getCalendarMonth(month: string, timeZoneValue?: string) {
   const { start, end } = dateForMonth(month);
   const timeZone = calendarTimeZone(timeZoneValue);
   const actions = readConfirmedActions(start, end);
-  return { month, timeZone, dates: [...new Set(actions.map(action => action.date))].sort() };
+  const unplanned = listUnplannedActionsForCalendar(start, end);
+  return { month, timeZone, dates: [...new Set([...actions, ...unplanned].map(action => action.date))].sort() };
 }
 
 export function getCalendarDay(dateValue: string, timeZoneValue?: string) {
   const date = calendarDate(dateValue);
   const timeZone = calendarTimeZone(timeZoneValue);
-  return { date, timeZone, actions: dailyActionDetails(readConfirmedActions(date, date)) };
+  const unplanned = listUnplannedActionsForCalendar(date, date);
+  return {
+    date, timeZone,
+    actions: dailyActionDetails([...readConfirmedActions(date, date), ...unplanned], new Set(unplanned.map(action => action.id))),
+  };
 }
