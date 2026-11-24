@@ -157,6 +157,24 @@ export function getWeeklyPlanForGoal(goalId: string, weekStart = currentWeekStar
   });
 }
 
+/** Returns scheduled actions from each week’s currently confirmed revision. */
+export function listConfirmedWeeklyPlanActions(startDate: string, endDate: string): WeeklyPlanAction[] {
+  if (!validDate(startDate) || !validDate(endDate) || startDate > endDate) {
+    throw new GoalDraftError('查询日期范围无效。', 400);
+  }
+  return withDatabase(database => {
+    const rows = database.prepare(`
+      SELECT versions.actions_json
+      FROM v2_weekly_plans AS plans
+      JOIN v2_weekly_plan_versions AS versions
+        ON versions.plan_id = plans.id AND versions.revision = plans.active_revision
+      WHERE plans.active_revision IS NOT NULL AND versions.status = 'confirmed'
+    `).all() as Array<{ actions_json: string }>;
+    return rows.flatMap(row => (JSON.parse(row.actions_json) as WeeklyPlanAction[])
+      .filter(action => action.date >= startDate && action.date <= endDate));
+  });
+}
+
 function getWeeklyPlanFromDatabase(database: DatabaseSync, id: string) {
   const row = database.prepare('SELECT * FROM v2_weekly_plans WHERE id=?').get(id) as Record<string, unknown>;
   const revision = Number(row.current_revision);
