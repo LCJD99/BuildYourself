@@ -26,6 +26,8 @@ export type WeeklyPlanGeneration = {
   updatedAt: string | null;
 };
 
+export type ConfirmedPlannedAction = WeeklyPlanAction & { weekStarts: string[] };
+
 function ensureSchema(database: DatabaseSync) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS v2_weekly_plans (
@@ -163,6 +165,27 @@ function getWeeklyPlanFromDatabase(database: DatabaseSync, id: string) {
   const activePlan = activeRevision === null ? null : mapPlan(database, row, activeRevision);
   const versions = (database.prepare('SELECT revision FROM v2_weekly_plan_versions WHERE plan_id=? ORDER BY revision').all(id) as Array<{ revision: number }>).map(item => mapPlan(database, row, Number(item.revision)));
   return { plan, activePlan, activeRevision, versions };
+}
+
+export function findConfirmedPlannedActionInDatabase(database: DatabaseSync, actionId: string): ConfirmedPlannedAction | null {
+  const rows = database.prepare(`SELECT p.week_start, p.id, p.active_revision, v.actions_json
+    FROM v2_weekly_plans p
+    JOIN v2_weekly_plan_versions v ON v.plan_id=p.id AND v.revision=p.active_revision
+    WHERE p.active_revision IS NOT NULL
+    ORDER BY p.week_start DESC`).all() as Array<{ week_start: string; actions_json: string }>;
+  const occurrences = rows.flatMap(row => {
+    const actions = JSON.parse(row.actions_json) as WeeklyPlanAction[];
+    const action = actions.find(item => item.id === actionId);
+    return action ? [{ action, weekStart: row.week_start }] : [];
+  });
+  if (!occurrences.length) return null;
+  const latest = occurrences[0].action;
+  return { ...latest, weekStarts: occurrences.map(item => item.weekStart) };
+}
+
+/** Reads an action only when it appears in a currently confirmed weekly plan. */
+export function getConfirmedPlannedAction(actionId: string): ConfirmedPlannedAction | null {
+  return withDatabase(database => findConfirmedPlannedActionInDatabase(database, actionId));
 }
 
 function validateActions(input: {
