@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { GoalDraftError, listEnabledGoals } from './goal-drafts-v2';
 import { openDatabase } from './store';
-import { getLatestActionCompletionByIds, getActionFeedbackForAction } from './action-feedback-v2';
+import { getLatestActionCompletionByIds, getActionFeedbackForAction, listUnplannedItemsForReview } from './action-feedback-v2';
 import { confirmWeeklyPlan, getConfirmedWeeklyPlanForWeek, getWeeklyPlan, getWeeklyPlanForGoal, saveWeeklyPlanDraft, validateWeeklyPlanProposal } from './weekly-plans-v2';
 import { proposeWeeklyReview } from './weekly-review-agent';
 import { currentWeekStart } from './weekly-plans-v2';
@@ -35,6 +35,12 @@ function validWeek(value: unknown): value is string {
 function nextWeek(value: string) {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + 7);
+  return date.toISOString().slice(0, 10);
+}
+
+function lastDayOfWeek(value: string) {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + 6);
   return date.toISOString().slice(0, 10);
 }
 
@@ -71,6 +77,7 @@ export async function createWeeklyReview(input: { weekStart: unknown; weekFeedba
   const expectedRevision = nextWeekSnapshot.plan?.revision ?? 0;
   const completions = getLatestActionCompletionByIds(currentPlan.actions.map(action => action.id));
   const priorFeedback = currentPlan.actions.flatMap(action => getActionFeedbackForAction(action.id));
+  const unplannedItems = listUnplannedItemsForReview(weekStart, lastDayOfWeek(weekStart));
   const requestId = randomUUID();
   const incomplete = currentPlan.actions.filter(action => (completions[action.id] ?? 0) < 1).map(action => ({
     ...action, date: nextWeekStart,
@@ -81,7 +88,7 @@ export async function createWeeklyReview(input: { weekStart: unknown; weekFeedba
   const planningActions = [...planningById.values()];
   const previous = planningActions;
   const proposal = await proposeWeeklyReview({ weekStart, nextWeekStart, weekFeedback, nextWeekFeedback, goals,
-    weekActions: currentPlan.actions, currentActions: planningActions, completions, priorFeedback });
+    weekActions: currentPlan.actions, unplannedItems, currentActions: planningActions, completions, priorFeedback });
   const proposedIds = new Set(proposal.actions.flatMap(action => action.operation === 'update' && action.id ? [action.id] : []));
   for (const action of incomplete) {
     if (!proposedIds.has(action.id)) proposal.actions.push({ ...action, operation: 'update' });

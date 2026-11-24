@@ -9,7 +9,7 @@ export type WeeklyReviewAgentResult = {
   actions: WeeklyPlanAgentResult['actions'];
 };
 
-const systemPrompt = `你负责总结本周工作，并根据用户分别对本周和下周的意见提出下周行动规划草稿。输入字段 weekActions 是本周行动及评估，currentActions 是已有的下周草稿行动和待延续行动。只返回一个 JSON 对象：{"summary":"本周工作总结","reply":"简短中文反馈","actions":[{"operation":"add 或 update","id":"update 时填写已存在行动 ID","title":"行动名称","description":"说明","date":"YYYY-MM-DD","goalIds":["目标 ID"],"attributeIds":["属性 ID"]}]}。必须把所有未完成的行动作为 update 保留原 ID，并安排在下一周；不得把它们改成不同 ID 的新行动。完成度为 null 或小于 1 的行动都视为未完成。保留已有下周行动，除非用户明确要求删除（系统不支持删除，请说明）。每项行动关联有效目标和该目标属性，安排日期限下一周。update 必须使用输入中准确的 ID；add 省略 ID。只输出 JSON，不用 Markdown。`;
+const systemPrompt = `你负责总结本周工作，并根据用户分别对本周和下周的意见提出下周行动规划草稿。输入字段 weekActions 是本周计划内行动及评估，unplannedItems 是本周计划外行动与杂项及其原始反馈，currentActions 是已有的下周草稿行动和待延续行动。总结应结合本周实际发生的计划内行动、计划外行动和杂项，区分计划外行动与无属性收益的杂项，不臆造结果。只返回一个 JSON 对象：{"summary":"本周工作总结","reply":"简短中文反馈","actions":[{"operation":"add 或 update","id":"update 时填写已存在行动 ID","title":"行动名称","description":"说明","date":"YYYY-MM-DD","goalIds":["目标 ID"],"attributeIds":["属性 ID"]}]}。必须把所有未完成的行动作为 update 保留原 ID，并安排在下一周；不得把它们改成不同 ID 的新行动。完成度为 null 或小于 1 的行动都视为未完成。保留已有下周行动，除非用户明确要求删除（系统不支持删除，请说明）。每项行动关联有效目标和该目标属性，安排日期限下一周。update 必须使用输入中准确的 ID；add 省略 ID。只输出 JSON，不用 Markdown。`;
 
 function invoke(prompt: string): Promise<string> {
   const command = process.env.BUILDYOURSELF_PI_BIN || 'pi';
@@ -35,6 +35,7 @@ export async function proposeWeeklyReview(input: {
   nextWeekFeedback: string;
   goals: GoalV2[];
   weekActions: WeeklyPlanAction[];
+  unplannedItems: unknown[];
   currentActions: WeeklyPlanAction[];
   completions: Record<string, number | null>;
   priorFeedback: unknown[];

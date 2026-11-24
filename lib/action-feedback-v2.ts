@@ -196,6 +196,22 @@ export function listUnplannedMiscellaneous() {
   });
 }
 
+/** Returns unplanned actions and miscellaneous records that actually occurred in a given review week. */
+export function listUnplannedItemsForReview(startDate: string, endDate: string) {
+  return withDatabase(database => {
+    ensureUnplannedSchema(database);
+    const rows = database.prepare(`SELECT f.id,f.action_id,f.action_snapshot_json,f.message,f.performed_on,f.completion,f.confidence,f.reply,f.created_at,k.kind
+      FROM v2_action_feedback f JOIN v2_unplanned_action_kinds k ON k.feedback_id=f.id
+      WHERE f.performed_on>=? AND f.performed_on<=? ORDER BY f.performed_on,f.created_at,f.id`).all(startDate, endDate) as Array<Record<string, unknown>>;
+    return rows.map(row => ({
+      kind: String(row.kind) as 'action' | 'misc',
+      action: row.kind === 'action' ? JSON.parse(String(row.action_snapshot_json)) as ConfirmedPlannedAction : null,
+      feedback: { id: String(row.id), actionId: String(row.action_id), message: String(row.message), performedOn: String(row.performed_on),
+        submittedAt: String(row.created_at), assessment: { completion: Number(row.completion), confidence: Number(row.confidence), reply: String(row.reply) } },
+    }));
+  });
+}
+
 export async function submitUnplannedActionFeedback(input: {
   message: unknown; idempotencyKey: unknown; performedOn: unknown;
 }) {

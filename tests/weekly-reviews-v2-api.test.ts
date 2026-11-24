@@ -11,6 +11,7 @@ import { POST as confirmPlan } from '../app/api/v2/weekly-plans/[id]/confirm/rou
 import { POST as editReviewPlan } from '../app/api/v2/weekly-reviews/[weekStart]/messages/route';
 import { POST as confirmReviewPlan } from '../app/api/v2/weekly-reviews/[weekStart]/confirm/route';
 import { POST as submitActionFeedback } from '../app/api/v2/action-feedback/route';
+import { POST as submitUnplannedFeedback } from '../app/api/v2/unplanned-feedback/route';
 import { getGoalAttributeContributions } from '../lib/action-feedback-v2';
 
 const { proposeGoalDraft, proposeWeeklyPlan, proposeWeeklyReview, proposeActionAssessment } = vi.hoisted(() => ({
@@ -65,11 +66,21 @@ describe('v0.2 周复盘 HTTP API', () => {
     const firstFeedback = await submitActionFeedback(new Request('http://localhost/api/v2/action-feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ actionId: originalAction.id, message: '我完成了一半。', idempotencyKey: 'week-one-feedback' }) }));
     expect(firstFeedback.status).toBe(201);
+    proposeActionAssessment.mockResolvedValueOnce({ completion: 0.5, confidence: 0.8, reply: '这项计划外行动有帮助。', contributions: [{ attributeId: goal.attributes[0].id, amount: 0.4 }] });
+    const unplanned = await submitUnplannedFeedback(new Request('http://localhost/api/v2/unplanned-feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: '额外练习英文对话。', performedOn: '2026-11-27', idempotencyKey: 'unplanned-practice' }) }));
+    expect((await unplanned.json()).kind).toBe('action');
+    proposeActionAssessment.mockResolvedValueOnce({ completion: 1, confidence: 1, reply: '已记录杂项。', contributions: [] });
+    const miscellaneous = await submitUnplannedFeedback(new Request('http://localhost/api/v2/unplanned-feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: '整理了桌面。', performedOn: '2026-11-27', idempotencyKey: 'unplanned-misc' }) }));
+    expect((await miscellaneous.json()).kind).toBe('misc');
     const response = await createReview(new Request('http://localhost/api/v2/weekly-reviews', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ weekStart: '2026-11-23', weekFeedback: '本周工作量较大。', nextWeekFeedback: '下周请把行动分散到工作日。' }),
     }));
     expect(response.status).toBe(201);
+    const reviewCall = proposeWeeklyReview.mock.calls[0][0];
+    expect(reviewCall.unplannedItems.map((item: { kind: string }) => item.kind).sort()).toEqual(['action', 'misc']);
     const result = await response.json();
     expect(result.review).toMatchObject({ weekStart: '2026-11-23', summary: expect.any(String), weekFeedback: '本周工作量较大。', nextWeekFeedback: '下周请把行动分散到工作日。' });
     expect(result.nextWeekPlan.plan.actions[0]).toMatchObject({ title: '练习英文介绍', date: '2026-11-30' });
@@ -98,7 +109,7 @@ describe('v0.2 周复盘 HTTP API', () => {
     const secondFeedback = await submitActionFeedback(new Request('http://localhost/api/v2/action-feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ actionId: originalAction.id, message: '我又练习了一次。', idempotencyKey: 'week-two-feedback' }) }));
     expect(secondFeedback.status).toBe(201);
-    const contributionRows = getGoalAttributeContributions(goal.id, goal.attributes[0].id);
+    const contributionRows = getGoalAttributeContributions(goal.id, goal.attributes[0].id).filter(row => row.actionId === originalAction.id);
     expect(contributionRows).toHaveLength(2);
     expect(contributionRows[0].amount).toBeCloseTo(0.32);
     expect(contributionRows[1].amount).toBeCloseTo(0.16);
