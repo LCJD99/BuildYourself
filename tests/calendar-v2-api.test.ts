@@ -7,15 +7,18 @@ import { POST as createDraft } from '../app/api/v2/goal-drafts/route';
 import { POST as confirmDraft } from '../app/api/v2/goal-drafts/[id]/confirm/route';
 import { POST as confirmWeeklyPlan } from '../app/api/v2/weekly-plans/[id]/confirm/route';
 import { POST as editWeeklyPlan } from '../app/api/v2/weekly-plans/[id]/messages/route';
+import { POST as submitFeedback } from '../app/api/v2/action-feedback/route';
 import { GET as getCalendarMonth } from '../app/api/v2/calendar/months/[month]/route';
 import { GET as getCalendarDay } from '../app/api/v2/calendar/days/[date]/route';
 
-const { proposeGoalDraft, proposeWeeklyPlan } = vi.hoisted(() => ({
+const { proposeGoalDraft, proposeWeeklyPlan, proposeActionAssessment } = vi.hoisted(() => ({
   proposeGoalDraft: vi.fn(),
   proposeWeeklyPlan: vi.fn(),
+  proposeActionAssessment: vi.fn(),
 }));
 vi.mock('../lib/goal-draft-agent', () => ({ proposeGoalDraft }));
 vi.mock('../lib/weekly-plan-agent', () => ({ proposeWeeklyPlan }));
+vi.mock('../lib/action-feedback-agent', () => ({ proposeActionAssessment }));
 
 const directory = mkdtempSync(join(tmpdir(), 'buildyourself-v2-calendar-'));
 const params = <T extends Record<string, string>>(value: T) => ({ params: Promise.resolve(value) });
@@ -33,6 +36,12 @@ beforeEach(() => {
   vi.setSystemTime(new Date('2026-04-30T17:00:00.000Z'));
   process.env.BUILDYOURSELF_DB = join(directory, `${randomUUID()}.sqlite`);
   proposeGoalDraft.mockReset().mockResolvedValue({ reply: '已整理目标。', draft: goalProposal });
+  proposeActionAssessment.mockReset().mockResolvedValue({
+    completion: 0.5,
+    confidence: 0.8,
+    reply: '已完成一半。',
+    contributions: [],
+  });
   proposeWeeklyPlan.mockReset().mockImplementation(async ({ goals, currentPlan, message }: {
     goals: Array<{ id: string; attributes: Array<{ id: string }> }>;
     currentPlan: { actions: Array<{ id: string; title: string; description: string; date: string }> } | null;
@@ -127,6 +136,28 @@ describe('v0.2 月历与每日安排 HTTP API', () => {
     expect(actions[0].actionId).toBeTruthy();
     expect(actions[0].goals.map((goal: { id: string }) => goal.id).sort()).toEqual([first.goal.id, second.goal.id].sort());
     expect(actions[0].goals.every((goal: { attributes: unknown[] }) => goal.attributes.length > 0)).toBe(true);
+  });
+
+  it('提交行动反馈后，单日接口返回最新完成度', async () => {
+    const { goal, weeklyPlanGeneration } = await enableGoal();
+    const plan = weeklyPlanGeneration.plan;
+    expect((await confirmPlan(plan.id, plan.revision)).status).toBe(200);
+    const actionId = plan.actions[0].id;
+
+    const before = await getCalendarDay(new Request('http://localhost/api/v2/calendar/days/2026-04-30'), params({ date: '2026-04-30' }));
+    expect((await before.json()).actions[0].completionFraction).toBeNull();
+
+    const feedback = await submitFeedback(new Request('http://localhost/api/v2/action-feedback', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actionId, message: '我完成了一半。', idempotencyKey: 'calendar-feedback' }),
+    }));
+    expect(feedback.status).toBe(201);
+
+    const after = await getCalendarDay(new Request('http://localhost/api/v2/calendar/days/2026-04-30'), params({ date: '2026-04-30' }));
+    const { actions } = await after.json();
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ actionId, completionFraction: 0.5 });
+    expect(actions[0].goals[0].id).toBe(goal.id);
   });
 
   it('拒绝无效日期、月份和时区', async () => {

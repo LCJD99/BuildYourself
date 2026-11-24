@@ -1,5 +1,6 @@
 import { GoalDraftError, listEnabledGoals } from './goal-drafts-v2';
 import { listConfirmedWeeklyPlanActions } from './weekly-plans-v2';
+import { getLatestActionCompletionByIds } from './action-feedback-v2';
 import type { WeeklyPlanAction } from './weekly-plan-agent';
 
 const defaultTimeZone = 'Asia/Shanghai';
@@ -86,6 +87,10 @@ function dailyActionDetails(actions: WeeklyPlanAction[]): V2CalendarAction[] {
       // Date-only plans have no assessment until the feedback API records one.
       completionFraction: null,
     });
+  }
+  const completionByActionId = getLatestActionCompletionByIds([...actionsById.keys()]);
+  for (const [actionId, action] of actionsById) {
+    action.completionFraction = completionByActionId[actionId] ?? null;
   }
   // Scheduled dates are plain YYYY-MM-DD values in the calendar's date grain.
   return [...actionsById.values()].sort((left, right) =>
