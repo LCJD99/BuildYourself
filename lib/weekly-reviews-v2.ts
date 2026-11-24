@@ -59,6 +59,21 @@ export function getWeeklyReview(weekStart: string) {
   });
 }
 
+export function updateWeeklyReviewPlanRevision(weekStart: string, planId: string, expectedRevision: number, revision: number) {
+  return withDatabase(database => {
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = database.prepare(`UPDATE v2_weekly_reviews SET revision=?
+        WHERE week_start=? AND plan_id=? AND revision=?`).run(revision, weekStart, planId, expectedRevision);
+      if (Number(result.changes) !== 1) throw new GoalDraftError('周复盘已由其他请求更新，请重新读取。', 409);
+      const updated = read(database, weekStart);
+      if (!updated) throw new GoalDraftError('找不到该周复盘。', 404);
+      database.exec('COMMIT');
+      return updated;
+    } catch (error) { database.exec('ROLLBACK'); throw error; }
+  });
+}
+
 export async function createWeeklyReview(input: { weekStart: unknown; weekFeedback: unknown; nextWeekFeedback: unknown }) {
   if (!validWeek(input.weekStart)) throw new GoalDraftError('周起始日期必须是有效的星期一。', 400);
   if (typeof input.weekFeedback !== 'string' || !input.weekFeedback.trim()
@@ -111,6 +126,7 @@ export async function createWeeklyReview(input: { weekStart: unknown; weekFeedba
 export function confirmWeeklyReviewPlan(weekStart: string, revision: unknown) {
   const review = withDatabase(database => read(database, weekStart));
   if (!review) throw new GoalDraftError('找不到该周复盘。', 404);
+  if (!Number.isInteger(revision) || Number(revision) !== review.revision) throw new GoalDraftError('复盘关联的下周规划版本已变化，请重新读取后确认。', 409);
   return confirmWeeklyPlan(review.planId, revision);
 }
 

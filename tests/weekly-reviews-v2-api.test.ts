@@ -92,6 +92,7 @@ describe('v0.2 周复盘 HTTP API', () => {
     expect(editResponse.status).toBe(200);
     const edited = await editResponse.json();
     expect(edited.plan).toMatchObject({ revision: 2, userMessage: '把练习安排在周二。' });
+    expect(edited.review).toMatchObject({ revision: 2 });
     const staleConfirm = await confirmReviewPlan(new Request('http://localhost/api/v2/weekly-reviews/2026-11-23/confirm', {
       method: 'POST', body: JSON.stringify({ revision: 1 }),
     }), params('2026-11-23'));
@@ -101,7 +102,7 @@ describe('v0.2 周复盘 HTTP API', () => {
     }), params('2026-11-23'));
     expect(confirmed.status).toBe(200);
     const reread = await readReview(new Request('http://localhost/api/v2/weekly-reviews/2026-11-23'), params('2026-11-23'));
-    expect(await reread.json()).toMatchObject({ review: result.review, nextWeekPlan: { plan: { revision: 2, status: 'confirmed' }, activeRevision: 2 } });
+    expect(await reread.json()).toMatchObject({ review: { ...result.review, revision: 2 }, nextWeekPlan: { plan: { revision: 2, status: 'confirmed' }, activeRevision: 2 } });
     const oldPlan = await (await import('../app/api/v2/weekly-plans/[id]/route')).GET(new Request('http://localhost'), planParams(planId));
     expect(await oldPlan.json()).toMatchObject({ activePlan: { revision: 1, status: 'confirmed' } });
     vi.setSystemTime(new Date('2026-11-24T04:01:00.000Z'));
