@@ -163,10 +163,10 @@ describe('v0.2 多目标与跨周闭环验收（HTTP，Agent 受控）', () => {
     expect(miscellaneousResult.feedback.contributions).toEqual([]);
     const miscellaneousList = await listMiscellaneous();
     expect((await miscellaneousList.json()).miscellaneous).toContainEqual(expect.objectContaining({ message: '整理了桌面。', performedOn: '2026-11-28' }));
-    const goalBeforeMiscRead = await getGoal(new Request('http://localhost'), params({ id: firstGoal.id }));
-    const progressBeforeMisc = (await goalBeforeMiscRead.json()).goal.attributes.map((item: { progress: number }) => item.progress);
-    expect(progressBeforeMisc[0]).toBeCloseTo(0.36, 10);
-    expect(progressBeforeMisc[1]).toBeCloseTo(0.2, 10);
+    const goalAfterMiscRead = await getGoal(new Request('http://localhost'), params({ id: firstGoal.id }));
+    const progressAfterMisc = (await goalAfterMiscRead.json()).goal.attributes.map((item: { progress: number }) => item.progress);
+    expect(progressAfterMisc[0]).toBeCloseTo(0.36, 10);
+    expect(progressAfterMisc[1]).toBeCloseTo(0.2, 10);
     const dayWithUnplanned = await getCalendarDay(new Request('http://localhost/api/v2/calendar/days/2026-11-28'), params({ date: '2026-11-28' }));
     expect((await dayWithUnplanned.json()).actions).toHaveLength(1);
 
@@ -194,7 +194,9 @@ describe('v0.2 多目标与跨周闭环验收（HTTP，Agent 受控）', () => {
     const reopenedReview = await getWeeklyReview(new Request('http://localhost/api/v2/weekly-reviews/2026-11-23'), params({ weekStart: '2026-11-23' }));
     expect((await reopenedReview.json()).review).toMatchObject({ weekFeedback: '共享计划有帮助。', nextWeekFeedback: '下周保持节奏。' });
     const reopenedPlan = await getWeeklyPlan(new Request('http://localhost'), params({ id: sharedPlan.id }));
-    expect((await reopenedPlan.json()).activePlan.status).toBe('confirmed');
+    expect((await reopenedPlan.json()).activePlan).toMatchObject({
+      status: 'confirmed', actions: [{ id: action.id, date: '2026-11-25' }],
+    });
 
     vi.setSystemTime(new Date('2026-12-01T04:00:00.000Z'));
     proposeActionAssessment.mockResolvedValueOnce({ completion: 0.75, confidence: 0.8, reply: '继续完成了一部分。', contributions: [
@@ -207,16 +209,22 @@ describe('v0.2 多目标与跨周闭环验收（HTTP，Agent 受控）', () => {
     }));
     expect(continued.status).toBe(201);
     const freshAttributeTraceAfterContinue = await getAttributeContributions(new Request('http://localhost'), params({ id: firstGoal.id, attributeId: firstGoal.attributes[0].id }));
-    expect((await freshAttributeTraceAfterContinue.json()).contributions.filter((row: { actionId: string }) => row.actionId === action.id)).toHaveLength(2);
-    const firstAttributeTrace = await getAttributeContributions(new Request('http://localhost'), params({ id: firstGoal.id, attributeId: firstGoal.attributes[0].id }));
-    const firstAttributeRows = (await firstAttributeTrace.json()).contributions.filter((row: { actionId: string }) => row.actionId === action.id);
+    const firstAttributeRows = (await freshAttributeTraceAfterContinue.json()).contributions.filter((row: { actionId: string }) => row.actionId === action.id);
     expect(firstAttributeRows).toHaveLength(2);
     expect(firstAttributeRows[0].amount).toBeCloseTo(0.2, 10);
     expect(firstAttributeRows[1].amount).toBeCloseTo(0.1, 10);
-    const secondAttributeTrace = await getAttributeContributions(new Request('http://localhost'), params({ id: secondGoal.id, attributeId: secondGoal.attributes[0].id }));
-    const secondAttributeRows = (await secondAttributeTrace.json()).contributions.filter((row: { actionId: string }) => row.actionId === action.id);
-    expect(secondAttributeRows).toHaveLength(2);
-    expect(secondAttributeRows[0].amount).toBeCloseTo(0.16, 10);
-    expect(secondAttributeRows[1].amount).toBeCloseTo(0.08, 10);
+    for (const [goal, expectedFirst, expectedAdditional] of [
+      [firstGoal, 0.2, 0.1], [secondGoal, 0.16, 0.08],
+    ] as const) {
+      for (const attribute of goal.attributes) {
+        const trace = goal.id === firstGoal.id && attribute.id === firstGoal.attributes[0].id
+          ? { json: async () => ({ contributions: firstAttributeRows }) }
+          : await getAttributeContributions(new Request('http://localhost'), params({ id: goal.id, attributeId: attribute.id }));
+        const rows = (await trace.json()).contributions.filter((row: { actionId: string }) => row.actionId === action.id);
+        expect(rows).toHaveLength(2);
+        expect(rows[0].amount).toBeCloseTo(expectedFirst, 10);
+        expect(rows[1].amount).toBeCloseTo(expectedAdditional, 10);
+      }
+    }
   });
 });
