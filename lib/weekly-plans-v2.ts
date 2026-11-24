@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { GoalDraftError, getEnabledGoal, listEnabledGoals, type GoalV2 } from './goal-drafts-v2';
 import { openDatabase } from './store';
-import { proposeWeeklyPlan, type WeeklyPlanAction } from './weekly-plan-agent';
+import { proposeWeeklyPlan, type WeeklyPlanAction, type WeeklyPlanAgentResult } from './weekly-plan-agent';
 
 export type V2WeeklyPlan = {
   id: string;
@@ -175,6 +175,14 @@ export function listConfirmedWeeklyPlanActions(startDate: string, endDate: strin
   });
 }
 
+export function getConfirmedWeeklyPlanForWeek(weekStart: string): V2WeeklyPlan | null {
+  assertWeekStart(weekStart);
+  return withDatabase(database => {
+    const row = database.prepare('SELECT * FROM v2_weekly_plans WHERE week_start=? AND active_revision IS NOT NULL').get(weekStart) as Record<string, unknown> | undefined;
+    return row ? mapPlan(database, row, Number(row.active_revision)) : null;
+  });
+}
+
 function getWeeklyPlanFromDatabase(database: DatabaseSync, id: string) {
   const row = database.prepare('SELECT * FROM v2_weekly_plans WHERE id=?').get(id) as Record<string, unknown>;
   const revision = Number(row.current_revision);
@@ -244,6 +252,15 @@ function validateActions(input: {
   return [...updated, ...preserved];
 }
 
+export function validateWeeklyPlanProposal(input: {
+  weekStart: string;
+  goals: GoalV2[];
+  actions: WeeklyPlanAgentResult['actions'];
+  previous: WeeklyPlanAction[];
+}) {
+  return validateActions(input);
+}
+
 function safeError(error: unknown): string {
   return error instanceof Error ? error.message : '规划生成失败，请检查 Agent 服务后重试。';
 }
@@ -255,6 +272,56 @@ function goalSnapshot(goals: GoalV2[]) {
 function actionCoversGoal(action: WeeklyPlanAction, goal: GoalV2) {
   return action.goalIds.includes(goal.id)
     && action.attributeIds.some(attributeId => goal.attributes.some(attribute => attribute.id === attributeId));
+}
+
+/** Persist a server-validated weekly-plan proposal produced by a related workflow. */
+export function saveWeeklyPlanDraft(input: {
+  weekStart: string;
+  expectedRevision: number;
+  actions: WeeklyPlanAction[];
+  goals: GoalV2[];
+  reply: string;
+  userMessage: string | null;
+}) {
+  assertWeekStart(input.weekStart);
+  if (!input.goals.length) throw new GoalDraftError('没有已启用目标，无法保存每周规划。', 409);
+  const currentSnapshot = goalSnapshot(input.goals);
+  if (JSON.stringify(goalSnapshot(listEnabledGoals())) !== JSON.stringify(currentSnapshot)) {
+    throw new GoalDraftError('已启用目标发生变化，请刷新后重试。', 409);
+  }
+  return withDatabase(database => {
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      if (JSON.stringify(persistedGoalSnapshot(database)) !== JSON.stringify(currentSnapshot)) {
+        throw new GoalDraftError('已启用目标发生变化，请刷新后重试。', 409);
+      }
+      const now = new Date().toISOString();
+      let row = database.prepare('SELECT * FROM v2_weekly_plans WHERE week_start=?').get(input.weekStart) as Record<string, unknown> | undefined;
+      if (!row) {
+        const id = randomUUID();
+        database.prepare('INSERT INTO v2_weekly_plans (id,week_start,current_revision,active_revision,created_at,updated_at) VALUES (?,?,0,NULL,?,?)')
+          .run(id, input.weekStart, now, now);
+        row = database.prepare('SELECT * FROM v2_weekly_plans WHERE id=?').get(id) as Record<string, unknown>;
+      }
+      if (Number(row.current_revision) !== input.expectedRevision) {
+        throw new GoalDraftError('下周规划已有新版本，请刷新后重新生成周复盘。', 409);
+      }
+      const revision = Number(row.current_revision) + 1;
+      if (revision > 1) database.prepare("UPDATE v2_weekly_plan_versions SET status='superseded' WHERE plan_id=? AND revision=? AND status='draft'")
+        .run(String(row.id), revision - 1);
+      database.prepare(`INSERT INTO v2_weekly_plan_versions (plan_id,revision,status,actions_json,goal_ids_json,reply,user_message,created_at,confirmed_at)
+        VALUES (?,?,'draft',?,?,?,?,?,NULL)`).run(String(row.id), revision, JSON.stringify(input.actions),
+        JSON.stringify(input.goals.map(goal => goal.id)), input.reply, input.userMessage, now);
+      database.prepare('UPDATE v2_weekly_plans SET current_revision=?,updated_at=? WHERE id=?').run(revision, now, String(row.id));
+      const saved = database.prepare('SELECT * FROM v2_weekly_plans WHERE id=?').get(String(row.id)) as Record<string, unknown>;
+      const plan = mapPlan(database, saved, revision);
+      database.exec('COMMIT');
+      return plan;
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  });
 }
 
 function persistedGoalSnapshot(database: DatabaseSync) {
